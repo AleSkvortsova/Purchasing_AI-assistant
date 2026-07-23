@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "approval-180k",
+    "query": "Кто согласует закупку на 180000 рублей?",
+    "expected_document_ids": ["kb-009"],
+    "preferred_document_id": "kb-009",
+    "expected_section_contains": ["Матрица согласования"],
+    "notes": "Вопрос неполный без бюджетного статуса, но retrieval должен найти матрицу."
+  },
+  {
+    "case_id": "approval-budget-matrix",
+    "query": "Правила согласования закупки в зависимости от суммы и наличия бюджета",
+    "expected_document_ids": ["kb-009"],
+    "preferred_document_id": "kb-009",
+    "expected_section_contains": ["Матрица согласования"],
+    "notes": "Точный нормативный источник важнее общих пояснений о бюджете."
+  },
+  {
+    "case_id": "status-needs-rework",
+    "query": "Что означает статус «Требует доработки»?",
+    "expected_document_ids": ["kb-010", "kb-007"],
+    "preferred_document_id": "kb-010",
+    "expected_section_contains": ["Требует доработки", "Допустимые переходы"],
+    "notes": "Допустимы FAQ и нормативный справочник статусов."
+  },
+  {
+    "case_id": "mixed-categories",
+    "query": "Можно ли объединить в одной заявке кресла, лицензии и курьерскую доставку?",
+    "expected_document_ids": ["kb-015", "kb-011"],
+    "preferred_document_id": "kb-015",
+    "expected_section_contains": ["разные категории", "Несвязанные категории"],
+    "notes": "Нужен источник о разделении несвязанных категорий."
+  },
+  {
+    "case_id": "transport-12-pallets",
+    "query": "Какие обязательные поля нужны для перевозки 12 паллет?",
+    "expected_document_ids": ["kb-005", "kb-011"],
+    "preferred_document_id": "kb-005",
+    "expected_section_contains": ["Категориальные поля", "Корректная перевозка"],
+    "notes": "Матрица полей является нормативным источником."
+  },
+  {
+    "case_id": "brand-samsung",
+    "query": "Можно ли потребовать конкретный бренд Samsung без эквивалента?",
+    "expected_document_ids": ["kb-015", "kb-011", "kb-010"],
+    "preferred_document_id": "kb-015",
+    "expected_section_contains": ["конкретный бренд", "Бренд без обоснования", "Можно ли указать бренд"],
+    "notes": "Нужно найти правило об обосновании бренда."
+  },
+  {
+    "case_id": "urgent-event-two-weeks",
+    "query": "Как оформить срочную заявку на мероприятие через две недели?",
+    "expected_document_ids": ["kb-006"],
+    "preferred_document_id": "kb-006",
+    "expected_section_contains": ["Обязательные данные для срочной заявки", "Нормативные сроки"],
+    "notes": "Retrieval не должен сам присваивать приоритет."
+  },
+  {
+    "case_id": "save-draft",
+    "query": "Как сохранить незавершённый черновик и продолжить позже?",
+    "expected_document_ids": ["kb-010", "kb-014"],
+    "preferred_document_id": "kb-010",
+    "expected_section_contains": ["Можно ли сохранить заявку", "Как сохранить и продолжить черновик"],
+    "notes": "Допустим FAQ или инструкция пользователя."
+  },
+  {
+    "case_id": "oral-request",
+    "query": "Можно ли срочно передать заявку закупщику устно?",
+    "expected_document_ids": ["kb-010", "kb-001"],
+    "preferred_document_id": "kb-010",
+    "expected_section_contains": ["Можно ли попросить закупщика устно", "Канал подачи"],
+    "notes": "Нужно найти правило об официальном канале подачи."
+  },
+  {
+    "case_id": "technical-responsibility",
+    "query": "Кто отвечает за правильность технических характеристик?",
+    "expected_document_ids": ["kb-010", "kb-008", "kb-001"],
+    "preferred_document_id": "kb-010",
+    "expected_section_contains": ["Кто отвечает за характеристики", "Роли и ответственность", "Ответственность"],
+    "notes": "Допустимы FAQ и нормативные документы."
+  },
+  {
+    "case_id": "it-integration-fields",
+    "query": "Какие обязательные поля нужны для услуги IT-интеграции?",
+    "expected_document_ids": ["kb-005", "kb-011"],
+    "preferred_document_id": "kb-005",
+    "expected_section_contains": ["Категориальные поля", "Корректная IT-услуга"],
+    "notes": "Матрица обязательных полей предпочтительна."
+  },
+  {
+    "case_id": "off-budget",
+    "query": "Как оформить внебюджетную заявку?",
+    "expected_document_ids": ["kb-010", "kb-009", "kb-001"],
+    "preferred_document_id": "kb-010",
+    "expected_section_contains": ["Можно ли подать внебюджетную заявку", "Матрица согласования", "Бюджет"],
+    "notes": "Вопрос затрагивает оформление и согласование."
+  },
+  {
+    "case_id": "sole-supplier",
+    "query": "Когда можно указать единственного поставщика?",
+    "expected_document_ids": ["kb-001", "kb-009", "kb-011"],
+    "preferred_document_id": "kb-001",
+    "expected_section_contains": ["Единственный поставщик", "Матрица согласования", "Необоснованный поставщик"],
+    "notes": "Регламент является предпочтительным источником."
+  },
+  {
+    "case_id": "service-acceptance",
+    "query": "Какими должны быть критерии приёмки услуги?",
+    "expected_document_ids": ["kb-015", "kb-005", "kb-003"],
+    "preferred_document_id": "kb-015",
+    "expected_section_contains": ["Нет критериев приёмки услуги", "Категориальные поля", "Правила"],
+    "notes": "Критерии должны быть проверяемыми."
+  },
+  {
+    "case_id": "delivery-date-past",
+    "query": "Что делать, если дата поставки указана в прошлом?",
+    "expected_document_ids": ["kb-015", "kb-005", "kb-011"],
+    "preferred_document_id": "kb-015",
+    "expected_section_contains": ["прошедшая или противоречивая дата", "Формальные проверки", "Дата в прошлом"],
+    "notes": "Нужно найти формальную ошибку даты."
+  }
+]
