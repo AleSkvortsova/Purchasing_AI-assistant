@@ -1,3 +1,15 @@
+---
+document_id: kb-010
+title: FAQ внутренних заказчиков
+document_type: faq
+version: "1.0"
+effective_date: "2026-07-21"
+owner: Отдел закупок
+priority: 7
+status: active
+language: ru
+---
+
 # FAQ внутренних заказчиков
 
 ## Подача заявки

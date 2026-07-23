@@ -1,3 +1,15 @@
+---
+document_id: kb-013
+title: База знаний ИИ-ассистента по закупкам
+document_type: overview
+version: "1.0"
+effective_date: "2026-07-21"
+owner: Отдел закупок
+priority: 9
+status: active
+language: ru
+---
+
 # База знаний ИИ-ассистента по закупкам
 
 Учебная база знаний для синтетической компании ООО «Вектор Дистрибуция».

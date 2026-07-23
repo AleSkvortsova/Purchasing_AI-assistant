@@ -1,0 +1,24 @@
+{
+  "issues": [
+    {
+      "chunk_id": null,
+      "code": "duplicate_heading",
+      "document_id": "kb-015",
+      "filename": "14_Типовые_ошибки_при_оформлении_заявок.md",
+      "level": "warning",
+      "message": "Heading 'как исправить' occurs 16 times"
+    },
+    {
+      "chunk_id": null,
+      "code": "duplicate_heading",
+      "document_id": "kb-015",
+      "filename": "14_Типовые_ошибки_при_оформлении_заявок.md",
+      "level": "warning",
+      "message": "Heading 'почему это проблема' occurs 16 times"
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "warnings": 2
+  }
+}

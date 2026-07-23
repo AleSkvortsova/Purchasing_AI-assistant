@@ -1,0 +1,64 @@
+{
+  "average_chunks_per_document": 8.36,
+  "chunk_count": 117,
+  "chunk_size_tokens": {
+    "max": 621,
+    "median": 112,
+    "min": 55
+  },
+  "document_count": 14,
+  "document_type_distribution": {
+    "approval_rules": 1,
+    "classifier": 1,
+    "error_guide": 1,
+    "examples": 1,
+    "faq": 1,
+    "field_matrix": 1,
+    "glossary": 1,
+    "regulation": 1,
+    "responsibility_matrix": 1,
+    "status_guide": 1,
+    "template": 2,
+    "urgency_rules": 1,
+    "user_guide": 1
+  },
+  "errors": 0,
+  "five_largest_chunks": [
+    {
+      "chunk_id": "bf8013c8-55bd-5768-ac9c-71857e28d63b",
+      "document_id": "kb-004",
+      "document_title": "Классификатор категорий закупок",
+      "section_path": "Классификатор категорий закупок",
+      "token_count_estimate": 621
+    },
+    {
+      "chunk_id": "d2646fd7-406d-5e52-a17f-0fff56849f1f",
+      "document_id": "kb-005",
+      "document_title": "Матрица обязательных полей",
+      "section_path": "Матрица обязательных полей > Категориальные поля",
+      "token_count_estimate": 536
+    },
+    {
+      "chunk_id": "c4573c54-70aa-5eef-9844-783b69441d8d",
+      "document_id": "kb-009",
+      "document_title": "Правила согласования заявок",
+      "section_path": "Правила согласования заявок > Матрица согласования",
+      "token_count_estimate": 373
+    },
+    {
+      "chunk_id": "7d21ab00-e375-52d4-8f1e-ae24bf396776",
+      "document_id": "kb-003",
+      "document_title": "Шаблон заявки на закупку услуги",
+      "section_path": "Шаблон заявки на закупку услуги",
+      "token_count_estimate": 333
+    },
+    {
+      "chunk_id": "451ce997-015b-5807-94f9-2707e3584cca",
+      "document_id": "kb-012",
+      "document_title": "Глоссарий",
+      "section_path": "Глоссарий",
+      "token_count_estimate": 318
+    }
+  ],
+  "warnings": 2
+}
