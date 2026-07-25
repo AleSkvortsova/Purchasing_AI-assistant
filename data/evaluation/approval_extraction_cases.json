@@ -1,0 +1,191 @@
+[
+  {
+    "case_id": "budgeted_exact",
+    "text": "Закупка бюджетная на 180000 рублей",
+    "expected_fields": {"amount": "180000", "budget_status": "budgeted"},
+    "expected_null_fields": ["urgency"],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "budget_is_not_status",
+    "text": "Бюджет 180 тысяч на мониторы",
+    "expected_fields": {"amount": "180000", "category_code": "G03"},
+    "expected_null_fields": ["budget_status"],
+    "expected_status": "needs_clarification",
+    "expected_warnings": [],
+    "expected_clarification_fields": ["budget_status"]
+  },
+  {
+    "case_id": "unbudgeted",
+    "text": "Внебюджетная закупка на 90000 рублей",
+    "expected_fields": {"amount": "90000", "budget_status": "unbudgeted"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "legal_services",
+    "text": "Юридические услуги на 600 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "600000", "budget_status": "budgeted", "category_code": "S11"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "brand_not_supplier",
+    "text": "Мониторы Samsung на 180 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "180000", "budget_status": "budgeted", "category_code": "G03", "single_supplier": false},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "single_supplier",
+    "text": "Единственный поставщик, сумма 600 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "600000", "budget_status": "budgeted", "single_supplier": true},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "urgent_claim",
+    "text": "Очень срочно нужны услуги на 200 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "200000", "budget_status": "budgeted", "urgency_claimed": true},
+    "expected_null_fields": ["urgency"],
+    "expected_status": "extracted",
+    "expected_warnings": ["Срочность требует проверки"],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "amount_range",
+    "text": "Стоимость будет от 180 до 220 тысяч, закупка бюджетная.",
+    "expected_fields": {"budget_status": "budgeted"},
+    "expected_null_fields": ["amount"],
+    "expected_status": "needs_clarification",
+    "expected_warnings": [],
+    "expected_clarification_fields": ["amount"]
+  },
+  {
+    "case_id": "it_with_access",
+    "text": "IT-интеграция с доступом к данным компании на 300 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "300000", "budget_status": "budgeted", "category_code": "S05", "has_data_access": true},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "site_repair",
+    "text": "Ремонт оборудования, выезд на объект, 150 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "150000", "budget_status": "budgeted", "category_code": "S01", "work_on_site": true},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "explicit_p1",
+    "text": "Приоритет P1, закупка бюджетная на 180 тысяч",
+    "expected_fields": {"amount": "180000", "budget_status": "budgeted", "urgency": "P1"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": ["требует подтверждения закупщиком"],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "explicit_p3",
+    "text": "Приоритет P3, закупка бюджетная на 180 тысяч",
+    "expected_fields": {"amount": "180000", "budget_status": "budgeted", "urgency": "P3"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": ["требует подтверждения закупщиком"],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "negative_amount",
+    "text": "Закупка бюджетная на -100 рублей",
+    "expected_fields": {"budget_status": "budgeted"},
+    "expected_null_fields": ["amount"],
+    "expected_status": "needs_clarification",
+    "expected_warnings": [],
+    "expected_clarification_fields": ["amount"]
+  },
+  {
+    "case_id": "multiple_amounts",
+    "text": "Товар стоит 100 тысяч, доставка 20 тысяч, закупка бюджетная",
+    "expected_fields": {"budget_status": "budgeted"},
+    "expected_null_fields": ["amount"],
+    "expected_status": "conflict",
+    "expected_warnings": [],
+    "expected_clarification_fields": ["amount"]
+  },
+  {
+    "case_id": "transport",
+    "text": "Перевозка паллет на 250 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "250000", "budget_status": "budgeted", "category_code": "S03"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "budget_conflict",
+    "text": "Закупка бюджетная, но в бюджете не предусмотрена, сумма 100 тысяч",
+    "expected_fields": {"amount": "100000"},
+    "expected_null_fields": ["budget_status"],
+    "expected_status": "conflict",
+    "expected_warnings": [],
+    "expected_clarification_fields": ["budget_status"]
+  },
+  {
+    "case_id": "it_access_unknown",
+    "text": "IT-интеграция на 200 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "200000", "budget_status": "budgeted", "category_code": "S05"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "remote_service",
+    "text": "Удалённая юридическая услуга на 300 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "300000", "budget_status": "budgeted", "category_code": "S11", "work_on_site": false},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": [],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "maximum_amount",
+    "text": "Закупка бюджетная, до 500 тысяч рублей",
+    "expected_fields": {"amount": "500000", "budget_status": "budgeted"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": ["верхняя граница"],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "approximate_amount",
+    "text": "Закупка бюджетная, бюджет около 200 тысяч",
+    "expected_fields": {"amount": "200000", "budget_status": "budgeted"},
+    "expected_null_fields": [],
+    "expected_status": "extracted",
+    "expected_warnings": ["приблизительная сумма"],
+    "expected_clarification_fields": []
+  },
+  {
+    "case_id": "ambiguous_printing",
+    "text": "Нужна готовая полиграфия и печать по макету на 100 тысяч, закупка бюджетная",
+    "expected_fields": {"amount": "100000", "budget_status": "budgeted"},
+    "expected_null_fields": ["category_code"],
+    "expected_status": "extracted",
+    "expected_warnings": ["нескольким категориям"],
+    "expected_clarification_fields": []
+  }
+]

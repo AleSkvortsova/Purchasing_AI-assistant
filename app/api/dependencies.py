@@ -4,6 +4,15 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 
 from app.core.config import get_settings
+from app.extraction.provider import (
+    ApprovalExtractionProvider,
+    OpenAIApprovalExtractionProvider,
+    RuleBasedApprovalExtractionProvider,
+)
+from app.extraction.service import (
+    ApprovalContextExtractionService,
+    ApprovalEvaluationOrchestrator,
+)
 from app.rag.embeddings import OpenAIEmbeddingProvider
 from app.rag.indexing_service import KnowledgeIndexingService
 from app.rag.repository import (
@@ -91,6 +100,55 @@ def get_approval_rule_service(
     ],
 ) -> ApprovalRuleService:
     return ApprovalRuleService(repository)
+
+
+def get_optional_approval_rule_service() -> ApprovalRuleService | None:
+    repository = get_supabase_approval_rule_repository()
+    return ApprovalRuleService(repository) if repository is not None else None
+
+
+@lru_cache
+def get_approval_extraction_provider() -> ApprovalExtractionProvider:
+    settings = get_settings()
+    if settings.approval_extraction_provider == "rule_based":
+        return RuleBasedApprovalExtractionProvider()
+    if not settings.openai_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "OpenAI approval extraction provider is not configured"
+            ),
+        )
+    return OpenAIApprovalExtractionProvider(
+        api_key=settings.openai_api_key,
+        model=settings.approval_extraction_model,
+        timeout_seconds=settings.approval_extraction_timeout_seconds,
+        max_retries=settings.approval_extraction_max_retries,
+    )
+
+
+def get_approval_extraction_service(
+    provider: Annotated[
+        ApprovalExtractionProvider,
+        Depends(get_approval_extraction_provider),
+    ],
+) -> ApprovalContextExtractionService:
+    return ApprovalContextExtractionService(
+        provider,
+        min_confidence=get_settings().approval_extraction_min_confidence,
+    )
+
+
+def get_approval_evaluation_orchestrator(
+    extraction_service: Annotated[
+        ApprovalContextExtractionService,
+        Depends(get_approval_extraction_service),
+    ],
+) -> ApprovalEvaluationOrchestrator:
+    return ApprovalEvaluationOrchestrator(
+        extraction_service,
+        get_optional_approval_rule_service(),
+    )
 
 
 @lru_cache

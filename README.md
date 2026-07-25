@@ -216,6 +216,34 @@ API: `POST /api/v1/approval-rules/evaluate` и
 маршрутом, а не фактическим согласованием. Подробности:
 [`docs/approval_rule_engine.md`](docs/approval_rule_engine.md).
 
+## Извлечение контекста согласования
+
+Extraction layer отделён от rule engine: provider извлекает только факты и
+evidence, детерминированный код нормализует значения, после чего orchestrator
+может передать готовый `ApprovalContext` в `ApprovalRuleService`.
+
+Локальный режим не использует сеть:
+
+```powershell
+python scripts/extract_approval_context.py `
+  "Юридические услуги на 600 тысяч, закупка бюджетная" `
+  --provider rule-based `
+  --json
+
+python scripts/evaluate_approval_extraction.py --offline --show-failures
+
+python scripts/validate_approval_extraction_schema.py
+```
+
+API: `GET /api/v1/approval-context/health`,
+`POST /api/v1/approval-context/extract` и
+`POST /api/v1/approval-context/extract-and-evaluate`.
+OpenAI provider использует Structured Outputs и включается явно; отсутствие
+ключа не приводит к скрытому fallback. Для безопасной технической диагностики
+CLI поддерживает `--debug`; без него
+сообщение об ошибке остаётся кратким. Подробности:
+[`docs/approval_context_extraction.md`](docs/approval_context_extraction.md).
+
 ## Проверка Ruff
 
 ```powershell
@@ -228,6 +256,7 @@ ruff check .
 app/
 ├── api/             # HTTP routers и dependency injection
 ├── core/            # настройки и логирование
+├── extraction/      # structured extraction, normalization и orchestration
 ├── bot/             # будущая Telegram-интеграция
 ├── llm/             # будущая LLM-интеграция
 ├── rag/             # embeddings, индексация, FTS и hybrid retrieval

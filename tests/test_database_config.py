@@ -4,7 +4,7 @@ from app.api.dependencies import (
     get_database_health_service,
     get_supabase_repository,
 )
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.main import app
 from app.repositories.memory import InMemoryRequestRepository
 from app.services.database import DatabaseHealthService
@@ -56,3 +56,24 @@ def test_application_works_without_supabase(monkeypatch, tmp_path) -> None:
     finally:
         get_settings.cache_clear()
         get_supabase_repository.cache_clear()
+
+
+def test_rule_based_extraction_does_not_require_openai() -> None:
+    settings = Settings(
+        _env_file=None,
+        approval_extraction_provider="rule_based",
+        openai_api_key=None,
+    )
+
+    assert settings.approval_extraction_configured is True
+    assert settings.openai_configured is False
+
+
+def test_openai_extraction_reports_missing_configuration() -> None:
+    settings = Settings(
+        _env_file=None,
+        approval_extraction_provider="openai",
+        openai_api_key=None,
+    )
+
+    assert settings.approval_extraction_configured is False

@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     rag_semantic_weight: float = Field(default=1.0, gt=0, le=10)
     rag_lexical_weight: float = Field(default=1.0, gt=0, le=10)
     enable_rag_index_endpoint: bool = False
+    approval_extraction_provider: Literal[
+        "openai",
+        "rule_based",
+    ] = "openai"
+    approval_extraction_model: str = "gpt-5.6-luna"
+    approval_extraction_timeout_seconds: float = Field(default=30, gt=0)
+    approval_extraction_max_retries: int = Field(default=2, ge=0, le=5)
+    approval_extraction_min_confidence: float = Field(
+        default=0.70,
+        ge=0,
+        le=1,
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -41,6 +53,13 @@ class Settings(BaseSettings):
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def approval_extraction_configured(self) -> bool:
+        return (
+            self.approval_extraction_provider == "rule_based"
+            or self.openai_configured
+        )
 
 
 @lru_cache
