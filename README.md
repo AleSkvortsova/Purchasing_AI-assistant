@@ -244,6 +244,15 @@ CLI поддерживает `--debug`; без него
 сообщение об ошибке остаётся кратким. Подробности:
 [`docs/approval_context_extraction.md`](docs/approval_context_extraction.md).
 
+## Детерминированный intake-диалог
+
+Пакет `app/intake` реализует локальное пошаговое заполнение черновика: реестр
+полей, безопасный merge, валидацию, полноту, один следующий вопрос, интеграцию
+с существующим rule engine и структурированную карточку. Технические endpoints
+`GET /api/v1/intake/health` и `POST /api/v1/intake/evaluate-step` ничего не
+сохраняют и не вызывают OpenAI. Подробности и ограничения описаны в
+[`docs/intake_dialog_core.md`](docs/intake_dialog_core.md).
+
 ## Проверка Ruff
 
 ```powershell
@@ -259,6 +268,7 @@ app/
 ├── extraction/      # structured extraction, normalization и orchestration
 ├── bot/             # будущая Telegram-интеграция
 ├── llm/             # будущая LLM-интеграция
+├── intake/          # детерминированное ядро intake-диалога
 ├── rag/             # embeddings, индексация, FTS и hybrid retrieval
 ├── rules/           # детерминированный расчёт маршрута согласования
 ├── repositories/    # Supabase и InMemory хранилища

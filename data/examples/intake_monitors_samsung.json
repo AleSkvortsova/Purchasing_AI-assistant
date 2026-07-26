@@ -1,0 +1,21 @@
+{
+  "procurement_type": "goods",
+  "category_code": "G03",
+  "title": "Мониторы Samsung для отдела",
+  "item_name": "Монитор",
+  "quantity": "10",
+  "unit": "шт.",
+  "specifications": "Диагональ 27 дюймов, IPS",
+  "preferred_brand": "Samsung",
+  "analogs_allowed": false,
+  "brand_justification": "Совместимость с действующим парком оборудования",
+  "amount": "180000",
+  "currency": "RUB",
+  "budget_status": "budgeted",
+  "desired_delivery_date": "2026-12-01",
+  "delivery_location": "Центральный офис",
+  "business_justification": "Оснащение новых рабочих мест",
+  "single_supplier": false,
+  "department": "ИТ",
+  "contact_person": "Анна Петрова"
+}

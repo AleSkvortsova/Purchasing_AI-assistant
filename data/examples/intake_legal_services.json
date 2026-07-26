@@ -1,0 +1,20 @@
+{
+  "procurement_type": "service",
+  "category_code": "S11",
+  "title": "Юридическое сопровождение договоров",
+  "item_name": "Юридические услуги",
+  "description": "Проверка и сопровождение договоров",
+  "specifications": "Проверить 20 договоров",
+  "desired_result": "Письменные юридические заключения",
+  "amount": "600000",
+  "currency": "RUB",
+  "budget_status": "budgeted",
+  "desired_delivery_date": "2026-12-01",
+  "delivery_location": "Удалённо",
+  "business_justification": "Снижение юридических рисков",
+  "single_supplier": true,
+  "supplier_name": "ООО Право",
+  "single_supplier_justification": "Уникальная отраслевая экспертиза",
+  "department": "Правовой отдел",
+  "contact_person": "Ирина Волкова"
+}
