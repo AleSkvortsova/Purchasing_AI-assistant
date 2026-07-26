@@ -13,6 +13,10 @@ from app.extraction.service import (
     ApprovalContextExtractionService,
     ApprovalEvaluationOrchestrator,
 )
+from app.intake_persistence.repositories import (
+    SupabaseIntakePersistenceRepository,
+)
+from app.intake_persistence.service import PersistentIntakeOrchestrator
 from app.rag.embeddings import OpenAIEmbeddingProvider
 from app.rag.indexing_service import KnowledgeIndexingService
 from app.rag.repository import (
@@ -265,3 +269,33 @@ def get_enabled_indexing_service(
         provider,
         embedding_model=settings.embedding_model,
     )
+
+
+@lru_cache
+def get_supabase_intake_persistence_repository(
+) -> SupabaseIntakePersistenceRepository | None:
+    settings = get_settings()
+    if not settings.supabase_configured:
+        return None
+    assert settings.supabase_url is not None
+    assert settings.supabase_service_role_key is not None
+    return SupabaseIntakePersistenceRepository.from_credentials(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+    )
+
+
+def get_optional_intake_persistence_orchestrator(
+) -> PersistentIntakeOrchestrator | None:
+    repository = get_supabase_intake_persistence_repository()
+    return PersistentIntakeOrchestrator(repository) if repository else None
+
+
+def get_intake_persistence_orchestrator() -> PersistentIntakeOrchestrator:
+    orchestrator = get_optional_intake_persistence_orchestrator()
+    if orchestrator is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Intake persistence is not configured",
+        )
+    return orchestrator

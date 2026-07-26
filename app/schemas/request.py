@@ -31,3 +31,4 @@ class RequestRead(RequestCreate):
     created_at: datetime
     updated_at: datetime
     confirmed_at: datetime | None = None
+    version: int = Field(default=1, ge=1)

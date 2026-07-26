@@ -253,6 +253,16 @@ CLI поддерживает `--debug`; без него
 сохраняют и не вызывают OpenAI. Подробности и ограничения описаны в
 [`docs/intake_dialog_core.md`](docs/intake_dialog_core.md).
 
+Persistence orchestration восстанавливает многошаговый draft, сохраняет
+dialog state и безопасные message logs, поддерживает idempotency и optimistic
+locking. InMemory demo работает без сети; production Supabase требует отдельно
+применить подготовленную migration 007. Технический `user_id` persistence API
+пока приходит от клиента и не подтверждён transport authentication, поэтому
+endpoint нельзя открывать как production API до привязки authenticated
+identity. Подробнее:
+[`docs/intake_persistence_orchestration.md`](docs/intake_persistence_orchestration.md)
+и [`docs/intake_persistence_migration_runbook.md`](docs/intake_persistence_migration_runbook.md).
+
 ## Проверка Ruff
 
 ```powershell
