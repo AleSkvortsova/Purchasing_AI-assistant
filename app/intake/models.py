@@ -19,6 +19,9 @@ class IntakeStatus(StrEnum):
     COLLECTING = "collecting"
     CONFLICT = "conflict"
     READY_FOR_CONFIRMATION = "ready_for_confirmation"
+    EDITING = "editing"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class UpdateSource(StrEnum):

@@ -263,6 +263,13 @@ identity. Подробнее:
 [`docs/intake_persistence_orchestration.md`](docs/intake_persistence_orchestration.md)
 и [`docs/intake_persistence_migration_runbook.md`](docs/intake_persistence_migration_runbook.md).
 
+После `ready_for_confirmation` отдельный детерминированный lifecycle-слой
+показывает актуальную карточку, возвращает draft к редактированию, отменяет или
+атомарно регистрирует его со статусом `new` и номером `PR-YYYY-NNNNNN`.
+Supabase требует отдельного применения подготовленной migration 008; offline
+demo запускается командой `python scripts/demo_request_lifecycle.py`.
+Подробности: [`docs/request_lifecycle.md`](docs/request_lifecycle.md).
+
 ## Проверка Ruff
 
 ```powershell

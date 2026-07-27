@@ -30,5 +30,10 @@ class RequestRead(RequestCreate):
     status: RequestStatus
     created_at: datetime
     updated_at: datetime
+    registered_at: datetime | None = None
     confirmed_at: datetime | None = None
+    confirmed_by: UUID | None = None
+    cancelled_at: datetime | None = None
+    cancelled_by: UUID | None = None
+    cancellation_reason: str | None = None
     version: int = Field(default=1, ge=1)

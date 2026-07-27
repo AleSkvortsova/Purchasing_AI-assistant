@@ -6,7 +6,7 @@ from enum import Enum
 from time import perf_counter
 from uuid import UUID
 
-from app.intake.models import IntakeFieldUpdate
+from app.intake.models import IntakeFieldUpdate, IntakeStatus
 from app.intake.service import RequestIntakeService
 from app.intake.validators import IntakeFieldValidator
 from app.intake_persistence.exceptions import (
@@ -77,6 +77,15 @@ class PersistentIntakeOrchestrator:
 
         request, created = self._resolve_request(normalized_user_id, request_id)
         dialog = self.repository.get_dialog_state(normalized_user_id)
+        if dialog is not None and dialog.intake_status in {
+            IntakeStatus.COMPLETED,
+            IntakeStatus.CANCELLED,
+        }:
+            if dialog.request_id == request.id:
+                raise PersistencePartialFailureError(
+                    "Активный черновик имеет завершённое состояние диалога"
+                )
+            dialog = None
         if dialog is not None and (
             dialog.user_id != normalized_user_id or dialog.request_id != request.id
         ):
@@ -252,6 +261,10 @@ class PersistentIntakeOrchestrator:
         if dialog.request_id != request.id:
             raise PersistencePartialFailureError(
                 "Dialog state относится к другой активной заявке"
+            )
+        if dialog.intake_status in {IntakeStatus.COMPLETED, IntakeStatus.CANCELLED}:
+            raise PersistencePartialFailureError(
+                "Активный черновик имеет завершённое состояние диалога"
             )
         if dialog.state_version != request.version:
             raise PersistencePartialFailureError(

@@ -13,6 +13,8 @@ lexical-функции и права доступа.
 его прежняя версия с целочисленными границами, миграция
 `scripts/sql/006_fix_approval_rule_ranges.sql` идемпотентно заменяет
 старые коды и уточняет границы до 0.01.
+Persistence orchestration добавляет migration 007, а подготовленная migration
+008 расширяет схему атомарным lifecycle регистрации и отмены заявки.
 
 ## Связи
 
@@ -29,6 +31,8 @@ knowledge_documents 1 ─── * knowledge_chunks
 
 approval_base_rules
 approval_additional_rules
+
+requests 1 ─── * request_lifecycle_commands
 ```
 
 ## Таблицы
@@ -40,9 +44,11 @@ approval_additional_rules
 
 ### `requests`
 
-Заявки и черновики. На текущем этапе приложение создаёт только `draft`;
-`request_number` и `confirmed_at` остаются пустыми. Тип заявки может быть
-`product`, `service` или `NULL`, пока черновик не заполнен.
+Заявки и черновики. Intake создаёт `draft`; lifecycle после явного
+подтверждения переводит его в `new`, присваивает `request_number` и сохраняет
+registration timestamps/actor. Отмена до регистрации переводит draft в
+`cancelled` без номера. Тип заявки может быть `product`, `service` или `NULL`,
+пока черновик не заполнен.
 
 Поле `data` хранит изменяемые категорийные поля заявки в JSONB. Статусы,
 разрешённые схемой: `draft`, `new`, `cancelled`.
@@ -60,8 +66,16 @@ approval_additional_rules
 
 ### `message_logs`
 
-Технический журнал сообщений, результата модели, длительности, источников и
-ошибок. На этом этапе таблица подготовлена, но запись логов ещё не подключена.
+Технический журнал intake-сообщений, lifecycle-команд, длительности, источников
+и ошибок. Lifecycle events имеют отдельные message types и metadata и не
+смешиваются с обычными вопросами intake.
+
+### `request_lifecycle_commands`
+
+Подготовленная migration 008 хранит результат mutation-команды для namespace
+`(user_id, command_type, idempotency_key)`. Это позволяет вернуть replay до
+проверки устаревшей версии и не создавать повторный номер или audit logs.
+Таблица не заменяет `message_logs`: она хранит технический idempotency result.
 
 ### `knowledge_documents`
 

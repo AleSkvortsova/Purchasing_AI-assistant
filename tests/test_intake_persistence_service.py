@@ -217,6 +217,38 @@ def test_stale_dialog_version_requires_recovery() -> None:
         service.get_active_session(USER_ID)
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "cancelled"])
+def test_draft_with_terminal_dialog_is_reported_as_corrupted(
+    terminal_status: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    service = PersistentIntakeOrchestrator(repository(storage))
+    saved = service.process_structured_step(
+        USER_ID, IntakeFieldUpdate(values={"item_name": "Монитор"})
+    )
+    storage.dialog_states[USER_ID]["intake_status"] = terminal_status
+    with pytest.raises(PersistencePartialFailureError, match="завершённое состояние"):
+        service.get_active_session(USER_ID)
+    with pytest.raises(PersistencePartialFailureError, match="завершённое состояние"):
+        service.process_structured_step(
+            USER_ID,
+            IntakeFieldUpdate(values={"description": "Уточнение"}),
+            request_id=saved.request_id,
+        )
+
+
+def test_draft_with_editing_dialog_remains_active() -> None:
+    storage = InMemoryIntakeStorage()
+    service = PersistentIntakeOrchestrator(repository(storage))
+    saved = service.process_structured_step(
+        USER_ID, IntakeFieldUpdate(values={"item_name": "Монитор"})
+    )
+    storage.dialog_states[USER_ID]["intake_status"] = "editing"
+    active = service.get_active_session(USER_ID)
+    assert active.request_id == saved.request_id
+    assert active.dialog_state.intake_status == IntakeStatus.EDITING
+
+
 def test_idempotency_replay_conflict_and_user_namespace() -> None:
     storage = InMemoryIntakeStorage()
     service = PersistentIntakeOrchestrator(repository(storage))

@@ -8,7 +8,6 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from supabase import Client, create_client
 
 from app.intake_persistence.exceptions import (
     ActiveDraftNotFoundError,
@@ -29,6 +28,7 @@ from app.intake_persistence.models import (
 from app.repositories.supabase import SupabaseRequestRepository
 from app.schemas.common import RequestStatus
 from app.schemas.request import RequestCreate, RequestRead
+from supabase import Client, create_client
 
 
 class IntakePersistenceRepository(Protocol):
@@ -63,6 +63,10 @@ class InMemoryIntakeStorage:
     dialog_states: dict[UUID, Any] = field(default_factory=dict)
     message_logs: list[PersistenceMessageLog] = field(default_factory=list)
     idempotency: dict[tuple[UUID, str], IdempotencyRecord] = field(default_factory=dict)
+    lifecycle_idempotency: dict[tuple[UUID, str, str], Any] = field(
+        default_factory=dict
+    )
+    lifecycle_sequence: int = 0
     fail_at: str | None = None
     lock: RLock = field(default_factory=RLock)
 

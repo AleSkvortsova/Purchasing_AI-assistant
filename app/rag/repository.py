@@ -6,8 +6,6 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from supabase import Client, create_client
-
 from app.rag.exceptions import KnowledgeRepositoryError
 from app.rag.models import (
     EmbeddingItem,
@@ -18,6 +16,7 @@ from app.rag.models import (
     LexicalRetrievalResult,
     RetrievalResult,
 )
+from supabase import Client, create_client
 
 _IGNORED_LEXICAL_TERMS = {
     "руб",

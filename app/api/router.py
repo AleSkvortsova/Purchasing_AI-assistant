@@ -6,6 +6,7 @@ from app.api.database import router as database_router
 from app.api.intake import router as intake_router
 from app.api.intake_sessions import router as intake_sessions_router
 from app.api.rag import router as rag_router
+from app.api.request_lifecycle import router as request_lifecycle_router
 from app.api.requests import router as requests_router
 
 api_router = APIRouter()
@@ -14,5 +15,6 @@ api_router.include_router(approval_rules_router)
 api_router.include_router(database_router)
 api_router.include_router(intake_router)
 api_router.include_router(intake_sessions_router)
+api_router.include_router(request_lifecycle_router)
 api_router.include_router(requests_router)
 api_router.include_router(rag_router)

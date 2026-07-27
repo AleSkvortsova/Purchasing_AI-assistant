@@ -13,6 +13,7 @@ from app.extraction.service import (
     ApprovalContextExtractionService,
     ApprovalEvaluationOrchestrator,
 )
+from app.intake.service import RequestIntakeService
 from app.intake_persistence.repositories import (
     SupabaseIntakePersistenceRepository,
 )
@@ -26,6 +27,8 @@ from app.rag.repository import (
 from app.rag.retrieval_service import KnowledgeRetrievalService
 from app.repositories.request import RequestRepository
 from app.repositories.supabase import SupabaseRequestRepository
+from app.request_lifecycle.repositories import SupabaseRequestLifecycleRepository
+from app.request_lifecycle.service import RequestLifecycleService
 from app.rules.repository import (
     ApprovalRuleRepository,
     SupabaseApprovalRuleRepository,
@@ -299,3 +302,31 @@ def get_intake_persistence_orchestrator() -> PersistentIntakeOrchestrator:
             detail="Intake persistence is not configured",
         )
     return orchestrator
+
+
+@lru_cache
+def get_supabase_request_lifecycle_repository() -> (
+    SupabaseRequestLifecycleRepository | None
+):
+    settings = get_settings()
+    if not settings.supabase_configured:
+        return None
+    assert settings.supabase_url is not None
+    assert settings.supabase_service_role_key is not None
+    return SupabaseRequestLifecycleRepository.from_credentials(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+    )
+
+
+def get_request_lifecycle_service() -> RequestLifecycleService:
+    repository = get_supabase_request_lifecycle_repository()
+    if repository is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Request lifecycle persistence is not configured",
+        )
+    return RequestLifecycleService(
+        repository,
+        RequestIntakeService(get_optional_approval_rule_service()),
+    )

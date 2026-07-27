@@ -29,7 +29,19 @@ class PersistenceMessageLog(BaseModel):
     request_id: UUID
     direction: Literal["incoming", "outgoing"]
     message_type: Literal[
-        "structured_update", "question", "conflict", "card", "system_error"
+        "structured_update",
+        "question",
+        "conflict",
+        "card",
+        "system_error",
+        "confirm_command",
+        "return_to_editing_command",
+        "cancel_command",
+        "request_registered",
+        "request_returned_to_editing",
+        "request_cancelled",
+        "lifecycle_conflict",
+        "lifecycle_error",
     ]
     message_id: str | None = None
     idempotency_key: str | None = None

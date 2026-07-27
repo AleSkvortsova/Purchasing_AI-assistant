@@ -2,8 +2,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol
 
-from supabase import Client, create_client
-
 from app.rules.exceptions import ApprovalRuleRepositoryError
 from app.rules.models import (
     ApprovalContext,
@@ -11,6 +9,7 @@ from app.rules.models import (
     ApprovalRuleStatistics,
     BudgetStatus,
 )
+from supabase import Client, create_client
 
 
 class ApprovalRuleRepository(Protocol):
