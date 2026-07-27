@@ -9,21 +9,22 @@
 
 `IntakeStatus` описывает состояние диалога (`collecting`, `conflict`,
 `ready_for_confirmation`) и не является `RequestStatus` из базы (`draft`,
-`new`, `cancelled`). Переход к `new` этим этапом не реализован.
+`new`, `cancelled`). Сам intake core не выполняет переход к `new`; это делает
+отдельный request lifecycle layer после явного подтверждения.
 
 ## Аудит модели хранения
 
 Таблица `requests` уже содержит `id`, `user_id`, `request_type`,
 `category_code`, `title`, `status` и расширяемый `data jsonb`. Поэтому сейчас
 SQL-миграция не нужна: базовые поля могут остаться колонками, остальные поля
-`RequestDraftData`, состояния значений и служебные данные диалога могут быть
-сериализованы в `data` после появления persistence orchestration.
+`RequestDraftData`, состояния значений и служебные данные диалога
+сериализуются persistence orchestration в `data.intake`.
 
 В существующем API типы называются `product` и `service`. Intake использует
-пользовательские понятия `goods`, `service`, `work`; будущий persistence-слой
-должен явно отобразить `goods → product`, а `work` сохранить в `data` или
-расширить SQL-контракт отдельной согласованной миграцией. Такая миграция нужна
-только если `work` потребуется фильтровать как самостоятельную колонку.
+пользовательские понятия `goods`, `service`, `work`; persistence mapping
+отображает `goods → product`, а `work` сохраняет в canonical draft. Отдельная
+согласованная миграция понадобится, только если `work` потребуется фильтровать
+как самостоятельную колонку.
 
 ## Реестр полей
 
@@ -119,9 +120,9 @@ choice-вопросы содержат варианты ответа. Начал
 - `python scripts/demo_intake_dialog.py` — компактная демонстрация;
 - `python scripts/demo_intake_dialog.py --from-empty` — полный сценарий G03.
 
-## Отложено
+## Связанные и следующие этапы
 
-Следующий этап должен отдельно добавить persistence orchestration, Telegram,
-извлечение остальных полей из свободного текста, RAG-ответы, подтверждение и
-отправку заявки. Ядро не является механизмом регистрации и не присваивает
-номер заявки.
+Persistence orchestration и request lifecycle реализованы отдельными слоями:
+ядро само не регистрирует заявку и не присваивает номер. Следующий этап —
+Telegram adapter MVP. Telegram markup, полный пользовательский E2E и генерация
+RAG-ответов остаются вне этого backend milestone.

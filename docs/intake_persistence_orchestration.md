@@ -23,18 +23,17 @@ Repositories выполняют только операции хранения. 
   поля;
 - `users`: владелец заявки.
 
-До migration 007 в схеме нет request version, уникального active draft,
-уникального idempotency namespace и атомарной операции request + dialog + два
-лога. `updated_at` меняется триггером, но недостаточен как строгий concurrency
-token при REST-update. Поэтому для production-корректности подготовлена, но не
-применена `scripts/sql/007_intake_persistence_orchestration.sql`.
+Migration 007 добавила request version, уникальный active draft, уникальный
+idempotency namespace и атомарную операцию request + dialog + два лога.
+`updated_at` по-прежнему не используется как concurrency token: optimistic
+locking основан на явном поле `version`.
 
 ## Активный черновик
 
 Persistence-статус остаётся существующим `draft`. Intake-статусы
 `collecting`, `conflict` и `ready_for_confirmation` находятся внутри JSON и не
 меняют SQL enum. Поэтому готовая к подтверждению карточка остаётся активным
-draft до будущей команды submit/cancel.
+draft до команды lifecycle confirm или cancel.
 
 При явном `request_id` проверяются существование, владелец и редактируемость.
 Без ID repository атомарно находит или создаёт draft. Несколько ранее
@@ -68,7 +67,21 @@ Find-or-create остаётся двухшаговой операцией на �
 активные конфликты, warnings, ожидаемый вопрос, intake status и безопасные
 audit identifiers. `completeness`, `RequestCard`, `ApprovalContext` и route
 пересчитываются при восстановлении: они зависят от актуального registry и
-approval rules. Display fallback title не записывается в draft.
+approval rules. Display fallback title не записывается как значение `title`.
+
+Канонический источник значений — нормализованный `RequestDraftData`, сохранённый
+как `data.intake.draft` вместе с `field_states`. Верхнеуровневые `data.amount`,
+`data.quantity`, `data.unit`, `data.required_date` и остальные legacy-поля —
+только совместимая проекция. На каждом успешном intake step mapper полностью
+перезаписывает эту проекцию из того же draft, включая `null`, поэтому прежнее
+значение не может пережить исправление. Колонки `request_type`, `category_code`
+и `title` формируются из того же draft; display fallback по-прежнему не
+записывается как `title`.
+
+После появления `data.intake` канонические поля нельзя менять через legacy
+`PATCH /requests/{id}`: такой запрос вернёт контролируемый conflict и должен
+быть заменён обычным intake step. PATCH несвязанных integration-ключей остаётся
+доступным и не меняет draft или его проекции.
 
 Отсутствующий intake JSON у legacy draft интерпретируется как schema version 1
 и объединяется с основными колонками. Неизвестная будущая версия отклоняется,
@@ -162,10 +175,11 @@ explicit correction, рост версии, логи и финальную ка�
 
 ## Ограничения до Telegram
 
-- migration 007 должна быть отдельно проверена и применена в Supabase;
-- перед созданием unique active-draft index нужно проверить старые дубликаты;
+- migration 007 применена и проверена в Supabase; preflight и runbook сохранены
+  для будущих развёртываний;
 - пользователя и канал аутентифицирует будущий transport layer;
-- submit/cancel, request number и переход `draft → new` не реализованы;
+- confirm/register, cancel, request number и переход `draft → new` реализованы
+  отдельным request lifecycle layer;
 - reconciliation worker и operational monitoring partial failures пока не
   реализованы;
 - extraction остальных intake-полей и Telegram markup остаются вне слоя.

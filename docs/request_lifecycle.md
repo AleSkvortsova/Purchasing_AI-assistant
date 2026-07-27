@@ -30,6 +30,27 @@ Dialog status не записывается в `requests.status`. Существ
 базы знаний используют пользовательские названия «Черновик», «Передана в отдел
 закупок» и «Отменена заказчиком» и не противоречат техническим кодам.
 
+## Проверенные переходы
+
+| Persistence status | Intake status | Действие | Результат |
+|---|---|---|---|
+| `draft` | `collecting` | заполнение обязательных полей | `draft / ready_for_confirmation` |
+| `draft` | `ready_for_confirmation` | return-to-editing | `draft / editing` |
+| `draft` | `editing` | обычный intake update | `draft / ready_for_confirmation` либо `collecting` |
+| `draft` | `ready_for_confirmation` | confirm | `new / completed` |
+| `draft` | `collecting` | cancel | `cancelled / cancelled` |
+
+Сквозной сценарий создания draft, последовательного заполнения, confirmation
+view, редактирования, повторного расчёта readiness и регистрации проверен через
+Swagger и реальную Supabase. Отдельно проверена отмена во время collecting.
+`new` и `cancelled` исключаются из active-draft lookup; следующий intake без
+request ID создаёт новый draft.
+
+Реализованные guards запрещают редактирование и повторную регистрацию `new`,
+а также редактирование и подтверждение `cancelled`. Stale `expected_version`,
+чужой owner и недопустимое состояние возвращают контролируемую ошибку без
+частичной записи.
+
 ## Confirmation view и повторная проверка
 
 `get_confirmation_view` ничего не записывает. Он восстанавливает draft из
@@ -65,6 +86,26 @@ PostgreSQL sequence, а не из `max()+1`; sequence не сбрасывает�
 Успешная команда переводит `draft → new`, увеличивает version ровно на 1,
 записывает `registered_at`, `confirmed_at`, `confirmed_by`, завершает dialog и
 создаёт два lifecycle audit events.
+
+При регистрации Python повторно строит нормализованный draft и все его
+совместимые проекции. `data.intake.intake_status` становится `completed`, а
+`next_question` — `null`. Это текущий terminal status, а не immutable снимок
+состояния до регистрации. Неизменяемое подтверждённое представление хранится
+отдельно в `data.lifecycle.final_request_card`; последующие terminal-команды его
+не переписывают.
+
+После применённой migration 008 repeat-safe migration 009
+синхронизирует legacy-проекции существующих зарегистрированных строк из
+`data.intake.draft`, переводит их intake status в `completed` и устанавливает
+trigger для последующих регистраций. Backfill не изменяет
+`lifecycle.final_request_card` или другие поля lifecycle snapshot.
+Draft keys `intake`, `lifecycle`, `schema_version`, `request_type`,
+`category_code`, `title` и `required_date` исключаются из общего JSON merge;
+управляемые проекции устанавливаются отдельно. Trigger в migration 009 всегда
+пересоздаётся как `BEFORE UPDATE`, чтобы повторный запуск не сохранял старую
+конфигурацию. Repair ограничен `status=new`: это единственный
+зарегистрированный статус текущей схемы `draft/new/cancelled`; отменённые
+черновики не меняются.
 
 `confirmed_by` и `cancelled_by` используют тот же внутренний UUID
 `public.users.id`, что и `requests.user_id`. Внешний `telegram_id` хранится
@@ -104,6 +145,8 @@ update. Intake заново рассчитывает readiness; следующа
 dialog, увеличивает version и пишет audit events. Физического удаления нет.
 Cancelled не является active draft; следующий intake без request ID создаёт
 новый. Повтор с новым ключом возвращает 409 `already cancelled`.
+Повтор исходной cancel-команды с тем же idempotency key возвращает сохранённый
+результат с `replayed=true`; version и `cancelled_at` не меняются.
 
 ## Idempotency и optimistic locking
 
@@ -153,8 +196,7 @@ Endpoints нельзя считать production-safe до привязки по
 
 Offline demo: `python scripts/demo_request_lifecycle.py`.
 
-Нужна подготовленная, но не применённая migration
-`scripts/sql/008_request_lifecycle.sql`: существующая схема не содержит всех
-timestamps/actors, lifecycle command store, sequence и RPC. Перед применением
-используется read-only preflight и
-`docs/request_lifecycle_migration_runbook.md`.
+Migrations 007, 008 и 009 применены в Supabase. Migration 009 успешно выполнена
+повторно: уже синхронизированная заявка не изменила `updated_at` или version,
+а `final_request_card` и `final_approval_route` остались неизменными. Процедура
+аудита 008 сохранена в `docs/request_lifecycle_migration_runbook.md`.

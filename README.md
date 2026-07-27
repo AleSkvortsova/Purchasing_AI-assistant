@@ -6,25 +6,40 @@ Backend-сервис будущего ИИ-ассистента по внутр�
 
 ## Текущий статус
 
-Реализованы FastAPI-сервис версии `0.1.0`, конфигурация из окружения,
-стандартное логирование, SQL-схема Supabase, repository/service-слои и операции
-создания, чтения и частичного обновления черновика. База знаний отделена от
-проектной документации; реализованы локальная валидация и Markdown-aware
-чанкинг.
+Backend MVP этапа intake и request lifecycle завершён и проверен через Swagger
+на реальной Supabase. Реализованы сохранение активного черновика,
+последовательный сбор и проверка полей, карточка, расчёт маршрута, возврат к
+редактированию, регистрация с номером, отмена, optimistic locking,
+идемпотентность команд и синхронизация canonical draft с legacy-проекциями.
 
-Реализованы OpenAI embeddings, хранение чанков в Supabase/pgvector,
-идемпотентная индексация и hybrid retrieval через CLI и API. Основной режим
-объединяет semantic и Russian full-text search через Reciprocal Rank Fusion;
-отдельные semantic и lexical режимы доступны для диагностики. Реализован
-детерминированный расчёт предварительного маршрута согласования. Генерация
-RAG-ответа, Telegram, n8n, Docker Compose, подтверждение и регистрация заявки
-на этом этапе не подключены.
+Также работают OpenAI extraction layer, embeddings, хранение чанков в
+Supabase/pgvector, идемпотентная индексация и hybrid retrieval через CLI и API.
+Это завершение backend milestone, а не всего продукта: Telegram adapter,
+пользовательский E2E через Telegram, интерфейс закупщика и фактическое
+исполнение согласований ещё не реализованы.
 
 ## Границы MVP
 
 Утверждённые продуктовые границы и критерии готовности описаны в
-[MVP_SCOPE.md](MVP_SCOPE.md). Этот репозиторий пока содержит только технический
-фундамент для последующих этапов MVP.
+[MVP_SCOPE.md](MVP_SCOPE.md). Следующий незавершённый этап — Telegram adapter
+MVP.
+
+## Архитектура backend MVP
+
+- FastAPI предоставляет HTTP API, Swagger и dependency injection;
+- Supabase PostgreSQL хранит пользователей, заявки, dialog state, команды и
+  технические логи;
+- pgvector и Russian FTS обеспечивают semantic, lexical и hybrid retrieval;
+- Pydantic-модели фиксируют API и внутренние структурированные контракты;
+- deterministic intake core отвечает за merge, validation, completeness,
+  следующий вопрос и карточку;
+- approval rule engine рассчитывает предварительный маршрут;
+- persistence orchestration атомарно сохраняет многошаговый intake;
+- request lifecycle реализует editing, confirm/register, cancel, optimistic
+  locking и idempotency;
+- OpenAI extraction layer извлекает факты, но итоговые статусы и правила
+  определяются детерминированным кодом;
+- будущий Telegram adapter станет transport-слоем поверх готового backend.
 
 ## Требования
 
@@ -57,8 +72,12 @@ python -m pip install -e ".[dev]"
    `scripts/sql/006_fix_approval_rule_ranges.sql`. Для чистого
    развёртывания с исправленной 005 она безопасно повторно закрепит
    те же коды и границы.
-8. В Project Settings найдите URL проекта и backend service role key.
-9. Создайте локальный `.env`:
+8. Выполните `scripts/sql/007_intake_persistence_orchestration.sql`.
+9. Выполните `scripts/sql/008_request_lifecycle.sql` после read-only preflight.
+10. Выполните repeat-safe
+    `scripts/sql/009_sync_request_data_projections.sql`.
+11. В Project Settings найдите URL проекта и backend service role key.
+12. Создайте локальный `.env`:
 
 ```dotenv
 SUPABASE_URL=https://your-project.supabase.co
@@ -255,8 +274,8 @@ CLI поддерживает `--debug`; без него
 
 Persistence orchestration восстанавливает многошаговый draft, сохраняет
 dialog state и безопасные message logs, поддерживает idempotency и optimistic
-locking. InMemory demo работает без сети; production Supabase требует отдельно
-применить подготовленную migration 007. Технический `user_id` persistence API
+locking. Migration 007 применена и проверена в Supabase. Технический `user_id`
+persistence API
 пока приходит от клиента и не подтверждён transport authentication, поэтому
 endpoint нельзя открывать как production API до привязки authenticated
 identity. Подробнее:
@@ -266,9 +285,17 @@ identity. Подробнее:
 После `ready_for_confirmation` отдельный детерминированный lifecycle-слой
 показывает актуальную карточку, возвращает draft к редактированию, отменяет или
 атомарно регистрирует его со статусом `new` и номером `PR-YYYY-NNNNNN`.
-Supabase требует отдельного применения подготовленной migration 008; offline
-demo запускается командой `python scripts/demo_request_lifecycle.py`.
+Migration 008 применена и проверена; migration 009 синхронизирует проекции из
+`data.intake.draft`, защищает registration snapshot и repeat-safe применена
+дважды. Offline demo запускается командой
+`python scripts/demo_request_lifecycle.py`.
 Подробности: [`docs/request_lifecycle.md`](docs/request_lifecycle.md).
+
+Допустимые persistence statuses текущего MVP: `draft`, `new`, `cancelled`.
+Отдельный `data.intake.intake_status` описывает состояние диалога:
+`collecting`, `ready_for_confirmation`, `editing`, `completed`, `cancelled`
+(а при противоречиях также технический `conflict`). `requests.status` отвечает
+за жизненный цикл записи, intake status — за состояние сбора данных.
 
 ## Проверка Ruff
 
@@ -305,12 +332,9 @@ pyproject.toml       # зависимости и настройки инстру
 
 ## Следующие этапы
 
-Пока не реализованы регистрация и подтверждение заявки, генерация
-`request_number`, запись состояния диалога и технических логов, Telegram,
-генерация LLM/RAG-ответа, фактическая маршрутизация и согласование, reranker и
-авторизация конечных пользователей.
+Следующий этап — **Telegram adapter MVP**. Пока не реализованы Telegram bot,
+полный пользовательский E2E, интерфейс закупщика, фактическое исполнение
+согласований, production transport authentication, production deployment,
+генерация RAG-ответа и reranker.
 Перед реальным пилотом необходимо включить RLS и определить политики
 минимальных прав.
-
-Следующий этап выбирается отдельно и должен оставаться в рамках
-`MVP_SCOPE.md`.

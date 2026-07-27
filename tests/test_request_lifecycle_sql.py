@@ -8,6 +8,9 @@ PREFLIGHT = (
     .read_text(encoding="utf-8")
     .casefold()
 )
+SYNC_SQL = Path("scripts/sql/009_sync_request_data_projections.sql").read_text(
+    encoding="utf-8"
+).casefold()
 
 
 def test_migration_is_transactional_idempotent_and_non_destructive() -> None:
@@ -77,6 +80,9 @@ def test_confirm_requires_current_snapshot_and_terminal_states_clear_active() ->
     assert "v_dialog.active_request_id is distinct from v_request_id" in SQL
     assert "'{lifecycle,confirmed_by}'" in SQL
     assert "to_jsonb(v_user_id)" in SQL
+    assert "request_type = command->>'request_type'" in SQL
+    assert "category_code = command->>'category_code'" in SQL
+    assert "title = command->>'title'" in SQL
 
 
 def test_preflight_is_read_only_and_covers_lifecycle_anomalies() -> None:
@@ -100,3 +106,93 @@ def test_preflight_is_read_only_and_covers_lifecycle_anomalies() -> None:
     assert "pg_indexes" in PREFLIGHT
     assert "relkind = 's'" in PREFLIGHT
     assert "pg_proc" in PREFLIGHT
+
+
+def test_projection_sync_migration_guards_and_repeat_safety() -> None:
+    # The offline test environment has no PostgreSQL server. These assertions
+    # verify the trigger/function contract statically; the runbook smoke test
+    # must execute the transition after the reviewed migration is applied.
+    assert SYNC_SQL.startswith("-- keep legacy")
+    assert "begin;" in SYNC_SQL
+    assert SYNC_SQL.rstrip().endswith("commit;")
+    assert "create or replace function" in SYNC_SQL
+    assert "drop trigger if exists requests_sync_data_on_registration" in SYNC_SQL
+    assert SYNC_SQL.index("drop trigger if exists") < SYNC_SQL.index(
+        "create trigger requests_sync_data_on_registration"
+    )
+    assert "before update on public.requests" in SYNC_SQL
+    assert "old.status = 'draft' and new.status = 'new'" in SYNC_SQL
+    assert "v_result := source_data || (" in SYNC_SQL
+    protected = (
+        "intake",
+        "lifecycle",
+        "schema_version",
+        "request_type",
+        "category_code",
+        "title",
+        "required_date",
+    )
+    merge_start = SYNC_SQL.index("v_result := source_data || (")
+    merge_end = SYNC_SQL.index(");", merge_start)
+    protected_merge = SYNC_SQL[merge_start:merge_end]
+    for key in protected:
+        assert f"- '{key}'" in protected_merge
+        assert SYNC_SQL.count(f"- '{key}'") == 2
+    assert "'{intake,intake_status}'" in SYNC_SQL
+    assert "'{intake,next_question}'" in SYNC_SQL
+    assert "'completed'" in SYNC_SQL
+    assert "'{lifecycle,final_request_card}'" not in SYNC_SQL
+    assert "'{lifecycle,final_approval_route}'" not in SYNC_SQL
+    assert "update public.requests as r" in SYNC_SQL
+    assert "where r.status = 'new'" in SYNC_SQL
+    assert "row(r.data, r.request_type, r.category_code, r.title) is distinct from" in (
+        SYNC_SQL
+    )
+    assert "request_type = p.synchronized_data->>'request_type'" in SYNC_SQL
+    assert "category_code = p.synchronized_data->>'category_code'" in SYNC_SQL
+    assert "title = p.synchronized_data->>'title'" in SYNC_SQL
+    assert "security definer" not in SYNC_SQL
+    assert "from public, anon, authenticated, service_role" in SYNC_SQL
+    assert "drop table" not in SYNC_SQL
+    assert "truncate" not in SYNC_SQL
+    assert "delete from" not in SYNC_SQL
+    assert "version =" not in SYNC_SQL
+
+    trigger_start = SYNC_SQL.index(
+        "create or replace function public.sync_request_data_on_registration()"
+    )
+    trigger_end = SYNC_SQL.index("$$;", trigger_start)
+    trigger_body = SYNC_SQL[trigger_start:trigger_end]
+    assert "public.synchronized_request_data_projection(" not in trigger_body
+    assert "new.data := new.data || (" in trigger_body
+
+
+def test_projection_sync_covers_types_nulls_and_registered_status_contract() -> None:
+    for field in (
+        "quantity",
+        "amount",
+        "unit",
+        "desired_delivery_date",
+        "budget_status",
+        "delivery_location",
+        "department",
+        "contact_person",
+    ):
+        # Ordinary draft keys are copied verbatim, retaining JSON type/null.
+        assert f"- '{field}'" not in SYNC_SQL
+    assert "v_draft->'desired_delivery_date'" in SYNC_SQL
+    assert "coalesce(to_jsonb(v_request_type), 'null'::jsonb)" in SYNC_SQL
+    assert "coalesce(to_jsonb(v_category_code), 'null'::jsonb)" in SYNC_SQL
+    assert "coalesce(to_jsonb(v_title), 'null'::jsonb)" in SYNC_SQL
+    assert "when 'goods' then 'product'" in SYNC_SQL
+    assert "when 'service' then 'service'" in SYNC_SQL
+    assert "when 'work' then 'service'" in SYNC_SQL
+
+    schema = Path("scripts/sql/001_initial_schema.sql").read_text(
+        encoding="utf-8"
+    ).casefold()
+    model = Path("app/schemas/common.py").read_text(encoding="utf-8").casefold()
+    assert "status in ('draft', 'new', 'cancelled')" in schema
+    assert 'draft = "draft"' in model
+    assert 'new = "new"' in model
+    assert 'cancelled = "cancelled"' in model

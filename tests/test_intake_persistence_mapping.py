@@ -123,7 +123,7 @@ def test_title_display_fallback_is_not_persisted() -> None:
     result = RequestIntakeService().process_step(draft, IntakeFieldUpdate())
     patch = IntakePersistenceMapper().draft_to_request_update(draft, result)
     assert patch.title is None
-    assert "title" not in patch.data["intake"]["draft"]
+    assert patch.data["intake"]["draft"]["title"] is None
 
 
 def test_intake_patch_preserves_unrelated_request_data() -> None:
@@ -141,6 +141,92 @@ def test_intake_patch_preserves_unrelated_request_data() -> None:
     assert patch.data["unrelated_flag"] is True
 
 
+def test_intake_patch_replaces_all_legacy_value_projections() -> None:
+    draft = RequestDraftData(
+        procurement_type="goods",
+        category_code="G03",
+        title=None,
+        quantity="10",
+        unit="уп.",
+        amount="180000",
+        desired_delivery_date="2030-01-02",
+    )
+    result = RequestIntakeService().process_step(draft, IntakeFieldUpdate())
+    patch = IntakePersistenceMapper().draft_to_request_update(
+        draft,
+        result,
+        existing_data={
+            "quantity": 12,
+            "unit": "шт.",
+            "amount": 200000,
+            "required_date": "2029-01-01",
+            "category_code": "OLD",
+            "unrelated": {"keep": True},
+        },
+    )
+    assert patch.data["quantity"] == "10"
+    assert patch.data["unit"] == "уп."
+    assert patch.data["amount"] == "180000"
+    assert patch.data["desired_delivery_date"] == "2030-01-02"
+    assert patch.data["required_date"] == "2030-01-02"
+    assert patch.data["procurement_type"] == "goods"
+    assert patch.data["request_type"] == "product"
+    assert patch.data["category_code"] == "G03"
+    assert patch.data["title"] is None
+    assert patch.data["unrelated"] == {"keep": True}
+    assert patch.request_type == RequestType.PRODUCT
+    assert patch.category_code == "G03"
+    assert patch.title is None
+
+
+def test_intake_patch_clears_stale_projection_values_with_json_null() -> None:
+    draft = RequestDraftData(
+        procurement_type="service",
+        category_code=None,
+        title=None,
+        amount=None,
+        quantity=None,
+        unit=None,
+        desired_delivery_date=None,
+        budget_status=None,
+        delivery_location=None,
+        department=None,
+        contact_person=None,
+    )
+    result = RequestIntakeService().process_step(draft, IntakeFieldUpdate())
+    patch = IntakePersistenceMapper().draft_to_request_update(
+        draft,
+        result,
+        existing_data={
+            "amount": "180000",
+            "quantity": "12",
+            "unit": "шт.",
+            "required_date": "2030-01-02",
+            "category_code": "S11",
+            "title": "Старое значение",
+            "budget_status": "budgeted",
+            "delivery_location": "Офис",
+            "department": "ИТ",
+            "contact_person": "Анна",
+        },
+    )
+    for field in (
+        "amount",
+        "quantity",
+        "unit",
+        "desired_delivery_date",
+        "required_date",
+        "category_code",
+        "title",
+        "budget_status",
+        "delivery_location",
+        "department",
+        "contact_person",
+    ):
+        assert field in patch.data
+        assert patch.data[field] is None
+
+
 def test_legacy_empty_and_legacy_data_are_supported() -> None:
     mapper = IntakePersistenceMapper()
     empty = mapper.request_to_draft(request_record())
@@ -154,6 +240,32 @@ def test_legacy_empty_and_legacy_data_are_supported() -> None:
     )
     assert legacy.procurement_type == ProcurementType.GOODS
     assert legacy.quantity == Decimal("10")
+
+
+def test_canonical_intake_draft_wins_over_stale_columns_and_legacy_values() -> None:
+    request = request_record(
+        request_type=RequestType.SERVICE,
+        category_code="OLD",
+        title="Старый заголовок",
+        data={
+            "schema_version": INTAKE_SCHEMA_VERSION,
+            "quantity": "12",
+            "category_code": "OLD",
+            "intake": {
+                "draft": {
+                    "procurement_type": "goods",
+                    "category_code": "G03",
+                    "title": None,
+                    "quantity": "10",
+                }
+            },
+        },
+    )
+    restored = IntakePersistenceMapper().request_to_draft(request)
+    assert restored.procurement_type == ProcurementType.GOODS
+    assert restored.category_code == "G03"
+    assert restored.title is None
+    assert restored.quantity == Decimal("10")
 
 
 def test_unknown_schema_version_is_rejected() -> None:

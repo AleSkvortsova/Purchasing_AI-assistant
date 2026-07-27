@@ -19,6 +19,8 @@ from app.schemas.request import RequestRead, RequestUpdate
 
 INTAKE_SCHEMA_VERSION = 1
 _DRAFT_META_FIELDS = {"field_states", "conflicts", "warnings"}
+_NON_VALUE_FIELDS = {"request_id", "requester_id", *_DRAFT_META_FIELDS}
+_LEGACY_FIELD_ALIASES = {"required_date": "desired_delivery_date"}
 
 
 class IntakePersistenceMapper:
@@ -48,10 +50,13 @@ class IntakePersistenceMapper:
             {
                 "request_id": request.id,
                 "requester_id": request.user_id,
-                "title": request.title,
-                "category_code": request.category_code,
             }
         )
+        # Old schema-version-1 rows did not store these two fields inside the
+        # draft. Columns are fallback-only for those rows; new rows keep the
+        # complete canonical value set in intake.draft.
+        payload.setdefault("title", request.title)
+        payload.setdefault("category_code", request.category_code)
         payload["procurement_type"] = self.persistence_type_to_intake(
             request.request_type,
             payload.get("procurement_type"),
@@ -76,14 +81,23 @@ class IntakePersistenceMapper:
             exclude={
                 "request_id",
                 "requester_id",
-                "title",
-                "category_code",
                 "field_states",
                 "conflicts",
                 "warnings",
             },
         )
         data = deepcopy(existing_data or {})
+        canonical_values = draft.model_dump(mode="json", exclude=_NON_VALUE_FIELDS)
+        # data.intake.draft is the canonical persisted intake representation.
+        # Top-level values are a compatibility projection for legacy consumers
+        # and must be replaced as one unit on every successful intake step.
+        data.update(canonical_values)
+        for legacy_name, canonical_name in _LEGACY_FIELD_ALIASES.items():
+            data[legacy_name] = canonical_values[canonical_name]
+        persistence_type = self.intake_type_to_persistence(draft.procurement_type)
+        data["request_type"] = (
+            persistence_type.value if persistence_type is not None else None
+        )
         data.update(
             {
                 "schema_version": INTAKE_SCHEMA_VERSION,
@@ -108,7 +122,7 @@ class IntakePersistenceMapper:
             }
         )
         return RequestUpdate(
-            request_type=self.intake_type_to_persistence(draft.procurement_type),
+            request_type=persistence_type,
             category_code=draft.category_code,
             title=draft.title,
             data=data,

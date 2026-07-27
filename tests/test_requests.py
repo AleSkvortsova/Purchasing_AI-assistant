@@ -6,10 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_request_service
+from app.core.exceptions import DraftUpdateForbiddenError
 from app.main import app
 from app.repositories.memory import InMemoryRequestRepository
 from app.schemas.common import RequestStatus, RequestType
-from app.schemas.request import RequestRead
+from app.schemas.request import RequestRead, RequestUpdate
 from app.services.requests import RequestService
 
 USER_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -110,3 +111,41 @@ def test_non_draft_update_is_forbidden() -> None:
     app.dependency_overrides.clear()
     assert response.status_code == 409
     assert response.json()["detail"] == "Only draft requests can be updated"
+
+
+def test_generic_patch_cannot_desynchronize_intake_managed_fields() -> None:
+    now = datetime.now(UTC)
+    existing = RequestRead(
+        id=uuid4(),
+        user_id=USER_ID,
+        request_type=RequestType.PRODUCT,
+        category_code="G03",
+        data={
+            "quantity": "10",
+            "intake": {"draft": {"quantity": "10"}},
+        },
+        status=RequestStatus.DRAFT,
+        created_at=now,
+        updated_at=now,
+    )
+    repository = InMemoryRequestRepository([existing])
+    service = RequestService(repository)
+
+    with pytest.raises(
+        DraftUpdateForbiddenError,
+        match="Intake-managed fields must be updated through an intake step",
+    ):
+        service.update_draft(existing.id, RequestUpdate(data={"quantity": "12"}))
+    with pytest.raises(
+        DraftUpdateForbiddenError,
+        match="Intake-managed fields must be updated through an intake step",
+    ):
+        service.update_draft(existing.id, RequestUpdate(category_code="G02"))
+
+    updated = service.update_draft(
+        existing.id,
+        RequestUpdate(data={"legacy_integration": {"external_id": "ERP-42"}}),
+    )
+    assert updated.data["quantity"] == "10"
+    assert updated.data["intake"]["draft"]["quantity"] == "10"
+    assert updated.data["legacy_integration"] == {"external_id": "ERP-42"}

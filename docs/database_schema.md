@@ -13,8 +13,10 @@ lexical-функции и права доступа.
 его прежняя версия с целочисленными границами, миграция
 `scripts/sql/006_fix_approval_rule_ranges.sql` идемпотентно заменяет
 старые коды и уточняет границы до 0.01.
-Persistence orchestration добавляет migration 007, а подготовленная migration
-008 расширяет схему атомарным lifecycle регистрации и отмены заявки.
+Persistence orchestration добавляет migration 007, migration 008 расширяет
+схему атомарным lifecycle регистрации и отмены заявки, а repeat-safe migration
+009 синхронизирует canonical intake draft с дублирующими проекциями. Все три
+миграции применены и проверены в Supabase.
 
 ## Связи
 
@@ -50,8 +52,13 @@ registration timestamps/actor. Отмена до регистрации пере
 `cancelled` без номера. Тип заявки может быть `product`, `service` или `NULL`,
 пока черновик не заполнен.
 
-Поле `data` хранит изменяемые категорийные поля заявки в JSONB. Статусы,
-разрешённые схемой: `draft`, `new`, `cancelled`.
+Поле `data` хранит изменяемые категорийные поля заявки в JSONB. Канонический
+источник актуальных значений intake — `data.intake.draft`. Верхнеуровневые
+колонки и legacy-ключи `data` являются синхронизированными проекциями.
+Migration 009 исправляет уже зарегистрированные строки и устанавливает trigger
+для последующих регистраций; повторное применение не меняет version,
+`updated_at` или lifecycle snapshots. Статусы, разрешённые схемой: `draft`,
+`new`, `cancelled`.
 
 | Внутреннее значение | Название для пользователя |
 |---|---|
@@ -72,7 +79,7 @@ registration timestamps/actor. Отмена до регистрации пере
 
 ### `request_lifecycle_commands`
 
-Подготовленная migration 008 хранит результат mutation-команды для namespace
+Migration 008 хранит результат mutation-команды для namespace
 `(user_id, command_type, idempotency_key)`. Это позволяет вернуть replay до
 проверки устаревшей версии и не создавать повторный номер или audit logs.
 Таблица не заменяет `message_logs`: она хранит технический idempotency result.

@@ -211,7 +211,7 @@ class InMemoryRequestLifecycleRepository:
                 if (
                     mutation.intake_status != IntakeStatus.COMPLETED
                     or mutation.request_data.get("intake", {}).get("intake_status")
-                    != IntakeStatus.READY_FOR_CONFIRMATION.value
+                    != IntakeStatus.COMPLETED.value
                     or mutation.completeness is None
                     or not mutation.completeness.is_complete
                     or mutation.request_card is None

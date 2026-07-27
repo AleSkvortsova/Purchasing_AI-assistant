@@ -142,7 +142,14 @@ class RequestLifecycleService:
             )
         assert intake_result.request_card is not None
         assert intake_result.approval_route is not None
-        request_data = _with_registration_snapshot(request.data, intake_result)
+        canonical_patch = self.mapper.draft_to_request_update(
+            intake_result.draft,
+            intake_result,
+            existing_data=request.data,
+        )
+        request_data = _with_registration_snapshot(
+            canonical_patch.data or {}, intake_result
+        )
         mutation = LifecycleMutation(
             user_id=normalized_user_id,
             request_id=normalized_request_id,
@@ -151,9 +158,9 @@ class RequestLifecycleService:
             idempotency_key=idempotency_key,
             fingerprint=fingerprint,
             request_data=request_data,
-            request_type=request.request_type,
-            category_code=request.category_code,
-            title=request.title,
+            request_type=canonical_patch.request_type,
+            category_code=canonical_patch.category_code,
+            title=canonical_patch.title,
             intake_status=IntakeStatus.COMPLETED,
             request_card=intake_result.request_card,
             approval_route=intake_result.approval_route,
@@ -425,6 +432,9 @@ class RequestLifecycleService:
 
 def _with_registration_snapshot(data: dict[str, Any], result) -> dict[str, Any]:
     snapshot = deepcopy(data)
+    intake = snapshot.setdefault("intake", {})
+    intake["intake_status"] = IntakeStatus.COMPLETED.value
+    intake["next_question"] = None
     snapshot["lifecycle"] = {
         **snapshot.get("lifecycle", {}),
         "registered_schema_version": REGISTERED_SCHEMA_VERSION,

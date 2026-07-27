@@ -471,3 +471,51 @@ def test_failure_audit_failure_never_masks_original_error() -> None:
         )
     assert storage.requests[saved.request_id].status == RequestStatus.DRAFT
     assert storage.requests[saved.request_id].request_number is None
+
+
+def test_corrected_quantity_is_consistent_after_confirm_and_by_number() -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    initial = full_update()
+    initial.values["quantity"] = "12"
+    created = intake.process_structured_step(USER_ID, initial)
+    corrected = intake.process_structured_step(
+        USER_ID,
+        IntakeFieldUpdate(values={"quantity": "10"}, explicit_correction=True),
+        request_id=created.request_id,
+    )
+    assert storage.requests[created.request_id].data["quantity"] == "10"
+    assert (
+        storage.requests[created.request_id].data["intake"]["draft"]["quantity"]
+        == "10"
+    )
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+    registered = lifecycle.confirm_request(
+        corrected.request_id,
+        USER_ID,
+        corrected.request_version,
+        "confirm-corrected-quantity",
+    )
+    request = lifecycle.get_by_request_number(registered.request_number, USER_ID)
+
+    assert request.data["quantity"] == "10"
+    assert request.data["intake"]["draft"]["quantity"] == "10"
+    card_quantity = next(
+        field
+        for section in request.data["lifecycle"]["final_request_card"]["sections"]
+        for field in section["fields"]
+        if field["code"] == "quantity"
+    )
+    assert card_quantity["display_value"] == "10"
+    assert request.data["intake"]["intake_status"] == "completed"
+    assert request.data["intake"]["next_question"] is None
+    assert request.data["request_type"] == "product"
+    assert request.data["procurement_type"] == "goods"
+    assert request.data["category_code"] == "G03"
+    assert request.request_type.value == request.data["request_type"]
+    assert request.category_code == request.data["category_code"]
