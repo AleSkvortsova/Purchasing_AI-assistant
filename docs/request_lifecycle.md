@@ -87,18 +87,17 @@ PostgreSQL sequence, а не из `max()+1`; sequence не сбрасывает�
 записывает `registered_at`, `confirmed_at`, `confirmed_by`, завершает dialog и
 создаёт два lifecycle audit events.
 
-При регистрации Python повторно строит нормализованный draft и все его
-совместимые проекции. `data.intake.intake_status` становится `completed`, а
-`next_question` — `null`. Это текущий terminal status, а не immutable снимок
-состояния до регистрации. Неизменяемое подтверждённое представление хранится
-отдельно в `data.lifecycle.final_request_card`; последующие terminal-команды его
-не переписывают.
+При регистрации Python повторно строит нормализованный draft и передаёт
+актуальные данные вместе с финальным snapshot. Исходная, уже применённая
+migration 008 сохраняет locked `v_request.data` и заменяет в нём только раздел
+`lifecycle`; она намеренно остаётся неизменной как часть истории миграций.
 
-После применённой migration 008 repeat-safe migration 009
-синхронизирует legacy-проекции существующих зарегистрированных строк из
-`data.intake.draft`, переводит их intake status в `completed` и устанавливает
-trigger для последующих регистраций. Backfill не изменяет
-`lifecycle.final_request_card` или другие поля lifecycle snapshot.
+Следующая repeat-safe migration 009 синхронизирует legacy-проекции существующих
+зарегистрированных строк из `data.intake.draft` и устанавливает `BEFORE UPDATE`
+trigger для последующих переходов `draft → new`. Именно она переносит значения
+draft в `data`, `request_type`, `category_code`, `title` и `required_date`,
+переводит intake status в `completed` и очищает `next_question`. Backfill не
+изменяет `lifecycle.final_request_card` или другие поля lifecycle snapshot.
 Draft keys `intake`, `lifecycle`, `schema_version`, `request_type`,
 `category_code`, `title` и `required_date` исключаются из общего JSON merge;
 управляемые проекции устанавливаются отдельно. Trigger в migration 009 всегда

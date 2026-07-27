@@ -203,9 +203,14 @@ begin
            or v_data->'lifecycle'->>'approval_rules_version' is null then
             raise exception 'invalid_lifecycle_snapshot' using errcode = '22023';
         end if;
-        -- Python sends a version-checked canonical intake representation plus
-        -- its synchronized legacy projections and final lifecycle snapshot.
-        -- Unrelated keys were copied from the locked request during mapping.
+        -- Keep the persisted intake and unrelated keys authoritative. Only the
+        -- final snapshot calculated by Python is added here.
+        v_data := jsonb_set(
+            v_request.data,
+            '{lifecycle}',
+            v_data->'lifecycle',
+            true
+        );
         v_number := 'PR-' || to_char(v_now, 'YYYY') || '-' ||
             lpad(nextval('public.request_number_seq')::text, 6, '0');
         v_status := 'new';
@@ -228,9 +233,6 @@ begin
         );
         update public.requests
         set data = v_data,
-            request_type = command->>'request_type',
-            category_code = command->>'category_code',
-            title = command->>'title',
             request_number = v_number,
             status = v_status,
             registered_at = v_now,

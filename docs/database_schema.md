@@ -13,10 +13,12 @@ lexical-функции и права доступа.
 его прежняя версия с целочисленными границами, миграция
 `scripts/sql/006_fix_approval_rule_ranges.sql` идемпотентно заменяет
 старые коды и уточняет границы до 0.01.
-Persistence orchestration добавляет migration 007, migration 008 расширяет
-схему атомарным lifecycle регистрации и отмены заявки, а repeat-safe migration
-009 синхронизирует canonical intake draft с дублирующими проекциями. Все три
-миграции применены и проверены в Supabase.
+Persistence orchestration добавляет migration 007. Исходная migration 008
+расширяет схему атомарным lifecycle регистрации и отмены заявки, сохраняя при
+confirm прежний intake JSON и заменяя только lifecycle snapshot. Применённая
+следом repeat-safe migration 009 синхронизирует canonical intake draft с
+дублирующими проекциями и устанавливает registration trigger. Все три миграции
+применены и проверены в Supabase; уже применённые файлы сохраняются неизменными.
 
 ## Связи
 

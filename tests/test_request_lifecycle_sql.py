@@ -80,9 +80,31 @@ def test_confirm_requires_current_snapshot_and_terminal_states_clear_active() ->
     assert "v_dialog.active_request_id is distinct from v_request_id" in SQL
     assert "'{lifecycle,confirmed_by}'" in SQL
     assert "to_jsonb(v_user_id)" in SQL
-    assert "request_type = command->>'request_type'" in SQL
-    assert "category_code = command->>'category_code'" in SQL
-    assert "title = command->>'title'" in SQL
+
+
+def test_original_008_and_follow_up_009_form_current_registration_contract() -> None:
+    # Migration 008 is immutable history: confirmation keeps the locked intake
+    # data and adds only the lifecycle snapshot. Migration 009, applied later,
+    # installs the BEFORE UPDATE trigger that synchronizes every projection.
+    assert "v_data := jsonb_set(\n            v_request.data," in SQL
+    assert "'{lifecycle}',\n            v_data->'lifecycle'" in SQL
+    assert "request_type = command->>'request_type'" not in SQL
+    assert "category_code = command->>'category_code'" not in SQL
+    assert "title = command->>'title'" not in SQL
+
+    assert "before update on public.requests" in SYNC_SQL
+    assert "old.status = 'draft' and new.status = 'new'" in SYNC_SQL
+    assert "v_draft := new.data #> '{intake,draft}'" in SYNC_SQL
+    assert "new.data := new.data || (" in SYNC_SQL
+    assert "v_draft->'desired_delivery_date'" in SYNC_SQL
+    assert "new.request_type := new.data->>'request_type'" in SYNC_SQL
+    assert "new.category_code := new.data->>'category_code'" in SYNC_SQL
+    assert "new.title := new.data->>'title'" in SYNC_SQL
+    assert "'{intake,intake_status}'" in SYNC_SQL
+    assert "'\"completed\"'::jsonb" in SYNC_SQL
+    assert "'{intake,next_question}'" in SYNC_SQL
+    assert "'{lifecycle,final_request_card}'" not in SYNC_SQL
+    assert "'{lifecycle,final_approval_route}'" not in SYNC_SQL
 
 
 def test_preflight_is_read_only_and_covers_lifecycle_anomalies() -> None:
