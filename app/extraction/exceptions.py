@@ -21,6 +21,8 @@ class ApprovalExtractionProviderError(ApprovalExtractionError):
         response_status: str | None = None,
         incomplete_reason: str | None = None,
         validation_errors: list[str] | None = None,
+        diagnostic_code: str | None = None,
+        validation_error_codes: dict[str, str] | None = None,
     ) -> None:
         super().__init__(safe_message)
         self.error_type = error_type
@@ -32,6 +34,8 @@ class ApprovalExtractionProviderError(ApprovalExtractionError):
         self.response_status = response_status
         self.incomplete_reason = incomplete_reason
         self.validation_errors = validation_errors
+        self.diagnostic_code = diagnostic_code
+        self.validation_error_codes = validation_error_codes
 
 
 class ApprovalExtractionValidationError(ApprovalExtractionError):

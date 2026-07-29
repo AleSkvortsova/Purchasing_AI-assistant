@@ -67,6 +67,12 @@ ApprovalContext существует и approval route имеет `resolved`. Е
 Fallback title отображается в карточке, но не записывается как пользовательский
 `title`.
 
+Явный `budget_status=unknown` считается заполненным для intake и позволяет
+сформировать карточку, однако approval route остаётся `needs_clarification`.
+Поэтому текущая confirmation policy блокирует регистрацию до проверки бюджета;
+она не назначает финансового контролёра автоматически, поскольку такого
+базового правила нет в утверждённой матрице.
+
 Именно Python является владельцем этих бизнес-проверок: registry полей,
 completeness, построения карточки, ApprovalContext и approval rules. В RPC
 передаётся уже пересчитанный snapshot. SQL не вычисляет готовность повторно и
@@ -128,6 +134,11 @@ Snapshot фиксирует подтверждённое пользовател�
 не редактируется в MVP. Он добавляется без перезаписи intake draft и unrelated
 ключей `requests.data`.
 
+Metadata отображения суммы (`amount_modifier`, `billing_period`) входят в
+сформированный до регистрации `final_request_card`. Они рассчитываются из
+актуального draft до confirm. Уже зарегистрированные immutable snapshots не
+пересчитываются и не изменяются задним числом.
+
 ## Возврат к редактированию
 
 Команда допустима только для актуальной версии `draft` со статусом
@@ -159,6 +170,21 @@ Replay проверяется до stale-version/status и возвращает 
 Любая новая mutation требует `expected_version`. При stale confirmation номер
 не выделяется. PostgreSQL sequence может получить пропуск только при ошибке
 после `nextval`; сама заявка при этом остаётся draft.
+
+## Telegram adapter
+
+Telegram использует этот же lifecycle service для confirm, return-to-editing и
+cancel и не воспроизводит переходы локально. Inline callback передаёт компактные
+`request_id` и `expected_version`; внутренний user ID берётся из привязки
+`telegram_id`, а не из callback data. Ключ на основе callback query ID делает
+повторную доставку одной команды безопасной. При version conflict adapter
+перечитывает active draft и показывает актуальную карточку и допустимые действия.
+
+После confirm заявка получает номер и перестаёт быть active. Новая потребность
+создаёт отдельный draft только при первом содержательном intake-сообщении. После
+cancel запись сохраняется в состоянии `cancelled`, но также исключается из active
+draft. Карточка с `budget_status=unknown` доступна для просмотра, однако confirm
+остаётся заблокирован действующей lifecycle policy до уточнения бюджета.
 
 ## Атомарность и audit
 

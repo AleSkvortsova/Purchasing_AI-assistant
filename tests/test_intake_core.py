@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from app.extraction.models import (
     ApprovalExtractionResult,
@@ -24,6 +25,42 @@ from app.intake.validators import IntakeFieldValidator
 from app.rules.repository import InMemoryApprovalRuleRepository
 from app.rules.service import ApprovalRuleService
 from scripts.validate_approval_rules import load_rule_seed
+
+
+@pytest.mark.parametrize("procurement_type", ["goods", "service"])
+def test_canonical_procurement_types_are_accepted(procurement_type: str) -> None:
+    assert RequestDraftData(procurement_type=procurement_type).procurement_type == (
+        procurement_type
+    )
+
+
+def test_work_is_rejected_by_canonical_draft_and_new_update() -> None:
+    with pytest.raises(ValidationError):
+        RequestDraftData(procurement_type="work")
+
+    result = RequestIntakeService().process_step(
+        RequestDraftData(),
+        IntakeFieldUpdate(values={"procurement_type": "work"}),
+    )
+    assert result.draft.procurement_type is None
+    assert "procurement_type" in result.completeness.invalid_fields
+
+
+@pytest.mark.parametrize(
+    ("procurement_type", "category_code"),
+    [("goods", "S01"), ("service", "G02")],
+)
+def test_category_must_match_procurement_type(
+    procurement_type: str,
+    category_code: str,
+) -> None:
+    errors = IntakeFieldValidator().validate_draft(
+        RequestDraftData(
+            procurement_type=procurement_type,
+            category_code=category_code,
+        )
+    )
+    assert errors["category_code"] == "Категория не соответствует типу закупки"
 
 
 def complete_goods(**changes) -> RequestDraftData:
@@ -172,6 +209,121 @@ def test_extraction_does_not_replace_confirmed_user_value() -> None:
     )
     assert result.draft.amount == Decimal("10")
     assert result.draft.conflicts
+
+
+def test_user_answer_replaces_unconfirmed_extraction_without_conflict() -> None:
+    merger = RequestMergeService()
+    proposed = merger.merge(
+        RequestDraftData(),
+        IntakeFieldUpdate(
+            values={"desired_result": "установить кондиционеры"},
+            source=UpdateSource.EXTRACTION,
+        ),
+    ).draft
+
+    assert proposed.field_states["desired_result"].confirmed is False
+    answered = merger.merge(
+        proposed,
+        IntakeFieldUpdate(
+            values={
+                "desired_result": (
+                    "кондиционеры работают по заявленным характеристикам"
+                )
+            },
+            source=UpdateSource.USER,
+            answered_field_code="desired_result",
+        ),
+    ).draft
+
+    assert answered.conflicts == []
+    assert answered.desired_result == (
+        "кондиционеры работают по заявленным характеристикам"
+    )
+    assert answered.field_states["desired_result"].source == UpdateSource.USER
+    assert answered.field_states["desired_result"].confirmed is True
+
+
+def test_direct_answer_does_not_replace_confirmed_user_value() -> None:
+    merger = RequestMergeService()
+    confirmed = merger.merge(
+        RequestDraftData(),
+        IntakeFieldUpdate(values={"desired_result": "Рабочая система"}),
+    ).draft
+    changed = merger.merge(
+        confirmed,
+        IntakeFieldUpdate(
+            values={"desired_result": "Другой результат"},
+            answered_field_code="desired_result",
+        ),
+    ).draft
+
+    assert changed.desired_result == "Рабочая система"
+    assert changed.conflicts[0].proposed_value == "Другой результат"
+
+
+def test_new_service_requirement_enriches_specs_without_conflict() -> None:
+    merger = RequestMergeService()
+    proposed = merger.merge(
+        RequestDraftData(),
+        IntakeFieldUpdate(
+            values={
+                "specifications": (
+                    "два кондиционера в переговорных комнатах"
+                )
+            },
+            source=UpdateSource.EXTRACTION,
+        ),
+    ).draft
+    enriched = merger.merge(
+        proposed,
+        IntakeFieldUpdate(
+            values={"specifications": "работы проводить в утренние часы"},
+            source=UpdateSource.USER,
+            answered_field_code="desired_result",
+        ),
+    ).draft
+
+    assert enriched.conflicts == []
+    assert "два кондиционера" in enriched.specifications
+    assert "утренние часы" in enriched.specifications
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected"),
+    [("keep", Decimal("10")), ("accept", Decimal("20"))],
+)
+def test_pending_conflict_can_be_resolved_once(
+    resolution: str,
+    expected: Decimal,
+) -> None:
+    merger = RequestMergeService()
+    confirmed = merger.merge(
+        RequestDraftData(), IntakeFieldUpdate(values={"amount": "10"})
+    ).draft
+    conflicted = merger.merge(
+        confirmed, IntakeFieldUpdate(values={"amount": "20"})
+    ).draft
+    conflict_id = conflicted.conflicts[0].id
+
+    resolved = merger.merge(
+        conflicted,
+        IntakeFieldUpdate(
+            resolve_conflict_id=conflict_id,
+            conflict_resolution=resolution,
+        ),
+    ).draft
+    replayed = merger.merge(
+        resolved,
+        IntakeFieldUpdate(
+            resolve_conflict_id=conflict_id,
+            conflict_resolution=resolution,
+        ),
+    ).draft
+
+    assert resolved.amount == expected
+    assert resolved.conflicts == []
+    assert replayed.amount == expected
+    assert replayed.conflicts == []
 
 
 def test_completeness_goods_service_and_conditionals() -> None:
@@ -368,14 +520,14 @@ def test_remote_or_digital_procurement_does_not_require_location(
     [
         complete_goods(delivery_location=None),
         complete_service(
-            procurement_type="work",
             category_code="S01",
             delivery_location=None,
+            work_on_site=True,
         ),
     ],
-    ids=["goods", "work"],
+    ids=["goods", "on-site-service"],
 )
-def test_goods_and_work_require_location(draft: RequestDraftData) -> None:
+def test_goods_and_on_site_service_require_location(draft: RequestDraftData) -> None:
     completeness = RequestCompletenessService().evaluate(draft)
     assert "delivery_location" in completeness.missing_fields
 
@@ -481,6 +633,31 @@ def test_business_justification_precedes_optional_features() -> None:
     )
     assert ready.status == IntakeStatus.READY_FOR_CONFIRMATION
     assert ready.next_question is None
+
+
+def test_unknown_budget_is_complete_but_has_unresolved_approval_route() -> None:
+    result = RequestIntakeService(approval_service()).process_step(
+        complete_goods(budget_status="unknown"),
+        IntakeFieldUpdate(),
+    )
+    assert result.status == IntakeStatus.READY_FOR_CONFIRMATION
+    assert result.completeness.is_complete is True
+    assert "budget_status" in result.completeness.completed_fields
+    assert result.next_question is None
+    assert result.approval_context is not None
+    assert result.approval_context.budget_status == "unknown"
+    assert result.approval_route is not None
+    assert result.approval_route.status == "needs_clarification"
+    assert result.approval_route.final_approvers == []
+    assert result.approval_route.warnings
+    assert result.request_card is not None
+    budget_fields = [
+        field
+        for section in result.request_card.sections
+        for field in section.fields
+        if field.code == "budget_status"
+    ]
+    assert budget_fields[0].display_value == "Требуется уточнение"
 
 
 @pytest.mark.parametrize(

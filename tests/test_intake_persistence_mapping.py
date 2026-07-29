@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -51,7 +52,6 @@ def request_record(**changes) -> RequestRead:
     [
         (ProcurementType.GOODS, RequestType.PRODUCT),
         (ProcurementType.SERVICE, RequestType.SERVICE),
-        (ProcurementType.WORK, RequestType.SERVICE),
     ],
 )
 def test_procurement_type_round_trip(intake_type, persistence_type) -> None:
@@ -75,6 +75,62 @@ def test_procurement_type_round_trip(intake_type, persistence_type) -> None:
     assert restored.procurement_type == intake_type
 
 
+def test_legacy_work_is_normalized_only_while_reading_persisted_draft(
+    caplog,
+) -> None:
+    request = request_record(
+        request_type=RequestType.SERVICE,
+        data={
+            "schema_version": INTAKE_SCHEMA_VERSION,
+            "procurement_type": "work",
+            "intake": {
+                "draft": {"procurement_type": "work", "item_name": "Ремонт"},
+                "field_states": {
+                    "procurement_type": {
+                        "field_code": "procurement_type",
+                        "value": "work",
+                        "source": "user",
+                    }
+                },
+            },
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        restored = IntakePersistenceMapper().request_to_draft(request)
+
+    assert restored.procurement_type == ProcurementType.SERVICE
+    assert restored.field_states["procurement_type"].value == "service"
+    assert "Normalized legacy procurement_type" in caplog.text
+    assert str(request.id) not in caplog.text
+
+    result = RequestIntakeService().process_step(restored, IntakeFieldUpdate())
+    patch = IntakePersistenceMapper().draft_to_request_update(restored, result)
+    assert patch.data["procurement_type"] == "service"
+    assert patch.data["intake"]["draft"]["procurement_type"] == "service"
+    assert patch.data["request_type"] == "service"
+    assert (
+        patch.data["intake"]["field_states"]["procurement_type"]["value"]
+        == "service"
+    )
+
+
+def test_legacy_work_audit_sql_is_read_only() -> None:
+    sql = Path("scripts/sql/check_legacy_work_records.sql").read_text(
+        encoding="utf-8"
+    )
+    executable = "\n".join(
+        line
+        for line in sql.casefold().splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    assert executable.lstrip().startswith("select")
+    for forbidden in ("insert ", "update ", "delete ", "truncate ", "drop "):
+        assert forbidden not in executable
+    assert "data #>> '{intake,draft,procurement_type}' = 'work'" in executable
+    assert "data ->> 'procurement_type' = 'work'" in executable
+
+
 def test_mapper_preserves_decimal_date_uuid_state_and_conflict() -> None:
     mapper = IntakePersistenceMapper()
     request_id = uuid4()
@@ -89,6 +145,7 @@ def test_mapper_preserves_decimal_date_uuid_state_and_conflict() -> None:
                 field_code="amount",
                 value=Decimal("180000.01"),
                 source=UpdateSource.USER,
+                evidence="amount_modifier=maximum; billing_period=per_month",
                 confirmed=True,
             )
         },
@@ -115,6 +172,9 @@ def test_mapper_preserves_decimal_date_uuid_state_and_conflict() -> None:
     assert restored.desired_delivery_date == date(2030, 1, 2)
     assert restored.request_id == request_id
     assert restored.field_states["amount"].confirmed is True
+    assert restored.field_states["amount"].evidence == (
+        "amount_modifier=maximum; billing_period=per_month"
+    )
     assert restored.conflicts[0].id == "c1"
 
 
@@ -225,6 +285,23 @@ def test_intake_patch_clears_stale_projection_values_with_json_null() -> None:
     ):
         assert field in patch.data
         assert patch.data[field] is None
+
+
+def test_unknown_budget_status_round_trips_in_canonical_json() -> None:
+    mapper = IntakePersistenceMapper()
+    draft = RequestDraftData(
+        procurement_type="service",
+        budget_status="unknown",
+    )
+    result = RequestIntakeService().process_step(draft, IntakeFieldUpdate())
+    patch = mapper.draft_to_request_update(draft, result)
+    assert patch.data["budget_status"] == "unknown"
+    assert patch.data["intake"]["draft"]["budget_status"] == "unknown"
+
+    restored = mapper.request_to_draft(
+        request_record(request_type=RequestType.SERVICE, data=patch.data)
+    )
+    assert restored.budget_status == "unknown"
 
 
 def test_legacy_empty_and_legacy_data_are_supported() -> None:

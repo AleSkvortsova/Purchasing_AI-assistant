@@ -13,6 +13,19 @@ ExtractionFieldName = Literal[
     "category",
     "has_data_access",
     "work_on_site",
+    "procurement_type",
+    "item_name",
+    "quantity",
+    "unit",
+    "specifications",
+    "desired_result",
+    "amount_modifier",
+    "billing_period",
+    "desired_delivery_date",
+    "delivery_location",
+    "business_justification",
+    "department",
+    "contact_person",
 ]
 
 
@@ -42,6 +55,21 @@ class OpenAIApprovalExtractionPayload(BaseModel):
     category_raw: str | None
     has_data_access_raw: bool | None
     work_on_site_raw: bool | None
+    procurement_type_raw: Literal["goods", "service"] | None
+    item_name_raw: str | None
+    quantity_raw: str | None
+    unit_raw: str | None
+    specifications_raw: str | None
+    desired_result_raw: str | None
+    amount_modifier_raw: Literal["exact", "maximum", "approximate"] | None
+    billing_period_raw: Literal[
+        "one_time", "per_month", "per_quarter", "per_year"
+    ] | None
+    desired_delivery_date_raw: str | None
+    delivery_location_raw: str | None
+    business_justification_raw: str | None
+    department_raw: str | None
+    contact_person_raw: str | None
     urgency_claimed: bool
     confidence_items: list[FieldConfidence]
     evidence_items: list[FieldEvidence]
@@ -63,6 +91,19 @@ class OpenAIApprovalExtractionPayload(BaseModel):
             category_raw=self.category_raw,
             has_data_access_raw=self.has_data_access_raw,
             work_on_site_raw=self.work_on_site_raw,
+            procurement_type_raw=self.procurement_type_raw,
+            item_name_raw=self.item_name_raw,
+            quantity_raw=self.quantity_raw,
+            unit_raw=self.unit_raw,
+            specifications_raw=self.specifications_raw,
+            desired_result_raw=self.desired_result_raw,
+            amount_modifier_raw=self.amount_modifier_raw,
+            billing_period_raw=self.billing_period_raw,
+            desired_delivery_date_raw=self.desired_delivery_date_raw,
+            delivery_location_raw=self.delivery_location_raw,
+            business_justification_raw=self.business_justification_raw,
+            department_raw=self.department_raw,
+            contact_person_raw=self.contact_person_raw,
             urgency_claimed=self.urgency_claimed,
             confidence_by_field={
                 item.field_name: item.confidence

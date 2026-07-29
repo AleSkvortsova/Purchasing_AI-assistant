@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 BudgetStatus = Literal["budgeted", "unbudgeted"]
+ApprovalBudgetStatus = Literal["budgeted", "unbudgeted", "unknown"]
 ConditionType = Literal[
     "urgency",
     "single_supplier",
@@ -39,7 +40,7 @@ StrictDecimal = Annotated[Decimal, BeforeValidator(_reject_float)]
 
 class ApprovalContext(BaseModel):
     amount: StrictDecimal = Field(ge=0)
-    budget_status: BudgetStatus | None = None
+    budget_status: ApprovalBudgetStatus | None = None
     urgency: Literal["P1", "P2", "P3", "P4"] | None = None
     single_supplier: bool = False
     category_code: str | None = None

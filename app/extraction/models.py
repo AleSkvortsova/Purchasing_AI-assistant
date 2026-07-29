@@ -24,6 +24,21 @@ class RawApprovalExtraction(BaseModel):
     category_raw: str | None = None
     has_data_access_raw: bool | None = None
     work_on_site_raw: bool | None = None
+    procurement_type_raw: Literal["goods", "service"] | None = None
+    item_name_raw: str | None = None
+    quantity_raw: str | None = None
+    unit_raw: str | None = None
+    specifications_raw: str | None = None
+    desired_result_raw: str | None = None
+    amount_modifier_raw: Literal["exact", "maximum", "approximate"] | None = None
+    billing_period_raw: Literal[
+        "one_time", "per_month", "per_quarter", "per_year"
+    ] | None = None
+    desired_delivery_date_raw: str | None = None
+    delivery_location_raw: str | None = None
+    business_justification_raw: str | None = None
+    department_raw: str | None = None
+    contact_person_raw: str | None = None
     urgency_claimed: bool = False
     confidence_by_field: dict[str, float] = Field(default_factory=dict)
     evidence_by_field: dict[str, str] = Field(default_factory=dict)

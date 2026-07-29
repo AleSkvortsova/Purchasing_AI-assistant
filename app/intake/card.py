@@ -8,6 +8,10 @@ from app.intake.models import (
     RequestCard,
     RequestDraftData,
 )
+from app.intake.service_requirements import (
+    normalize_service_desired_result,
+    normalize_service_requirements,
+)
 from app.rules.models import ApprovalRouteResult
 
 SECTION_ORDER = (
@@ -41,12 +45,24 @@ class RequestCardBuilder:
         approval_route: ApprovalRouteResult | None = None,
     ) -> RequestCard:
         sections: dict[str, list[CardField]] = {name: [] for name in SECTION_ORDER}
+        service_requirements = (
+            normalize_service_requirements(draft)
+            if draft.procurement_type == "service"
+            else None
+        )
         for definition in sorted(
             self.registry.all(), key=lambda item: item.display_order
         ):
             if definition.code in {"request_id", "requester_id", "currency"}:
                 continue
             value = getattr(draft, definition.code)
+            if service_requirements is not None and definition.code == "specifications":
+                value = service_requirements
+            if (
+                draft.procurement_type == "service"
+                and definition.code == "desired_result"
+            ):
+                value = normalize_service_desired_result(value)
             if value is None:
                 continue
             section = SECTION_BY_FIELD.get(definition.code, definition.card_section)
@@ -55,6 +71,7 @@ class RequestCardBuilder:
                     code=definition.code,
                     label=definition.label,
                     display_value=_display(definition.code, value),
+                    metadata=_field_metadata(definition.code, draft),
                 )
             )
         if approval_route is not None:
@@ -103,4 +120,24 @@ def _display(code: str, value: Any) -> str:
             if value in CATEGORY_NAMES
             else str(value)
         )
+    if code == "budget_status":
+        return {
+            "budgeted": "Предусмотрена бюджетом",
+            "unbudgeted": "Не предусмотрена бюджетом",
+            "unknown": "Требуется уточнение",
+        }.get(str(value), str(value))
     return str(value)
+
+
+def _field_metadata(code: str, draft: RequestDraftData) -> dict[str, str]:
+    if code != "amount":
+        return {}
+    state = draft.field_states.get(code)
+    if state is None or not state.evidence:
+        return {}
+    result: dict[str, str] = {}
+    for part in state.evidence.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key in {"amount_modifier", "billing_period"}:
+            result[key] = value.strip()
+    return result

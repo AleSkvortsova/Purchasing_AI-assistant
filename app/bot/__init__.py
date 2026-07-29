@@ -1,1 +1,1 @@
-"""Telegram integration package reserved for a future stage."""
+"""Thin Telegram adapter over the existing intake application services."""

@@ -12,7 +12,6 @@ from app.rules.models import ApprovalContext, ApprovalRouteResult
 class ProcurementType(StrEnum):
     GOODS = "goods"
     SERVICE = "service"
-    WORK = "work"
 
 
 class IntakeStatus(StrEnum):
@@ -70,7 +69,7 @@ class RequestDraftData(BaseModel):
     brand_justification: str | None = None
     amount: Decimal | None = None
     currency: str = "RUB"
-    budget_status: Literal["budgeted", "unbudgeted"] | None = None
+    budget_status: Literal["budgeted", "unbudgeted", "unknown"] | None = None
     desired_delivery_date: date | None = None
     delivery_location: str | None = None
     business_justification: str | None = None
@@ -93,11 +92,23 @@ class RequestDraftData(BaseModel):
         return value.strip().upper() if isinstance(value, str) else value
 
 
+class FieldCorrection(BaseModel):
+    operation: Literal["replace"] = "replace"
+    target_field: str
+    old_value: Any
+    new_value: Any
+
+
 class IntakeFieldUpdate(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     source: UpdateSource = UpdateSource.USER
     explicit_correction: bool = False
     evidence_by_field: dict[str, str] = Field(default_factory=dict)
+    corrections: list[FieldCorrection] = Field(default_factory=list)
+    suppressed_extraction_fields: list[str] = Field(default_factory=list)
+    answered_field_code: str | None = None
+    resolve_conflict_id: str | None = None
+    conflict_resolution: Literal["accept", "keep"] | None = None
     message_id: str | None = None
 
 
@@ -135,6 +146,7 @@ class CardField(BaseModel):
     code: str
     label: str
     display_value: str
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class CardSection(BaseModel):

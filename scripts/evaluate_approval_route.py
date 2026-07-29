@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--amount", required=True)
     parser.add_argument(
         "--budget-status",
-        choices=("budgeted", "unbudgeted"),
+        choices=("budgeted", "unbudgeted", "unknown"),
     )
     parser.add_argument("--urgency", choices=("P1", "P2", "P3", "P4"))
     parser.add_argument("--single-supplier", action="store_true")

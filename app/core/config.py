@@ -10,7 +10,13 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     app_env: str = "development"
     log_level: str = "INFO"
+    app_timezone: str = "Europe/Moscow"
     api_v1_prefix: str = "/api/v1"
+    telegram_bot_token: str | None = None
+    telegram_extraction_mode: Literal[
+        "rule", "openai", "hybrid", "fake"
+    ] | None = None
+    telegram_extraction_debug: bool = False
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
     database_url: str | None = None
@@ -49,6 +55,18 @@ class Settings(BaseSettings):
     @property
     def supabase_configured(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_role_key)
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram_bot_token)
+
+    @property
+    def resolved_telegram_extraction_mode(self) -> Literal[
+        "rule", "openai", "hybrid", "fake"
+    ]:
+        if self.telegram_extraction_mode is not None:
+            return self.telegram_extraction_mode
+        return "hybrid" if self.openai_configured else "rule"
 
     @property
     def openai_configured(self) -> bool:

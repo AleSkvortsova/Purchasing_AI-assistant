@@ -19,6 +19,14 @@ BOOLEAN_FACT_FIELDS = {
     "has_data_access",
     "work_on_site",
 }
+SEMANTIC_EVIDENCE_FIELDS = {
+    "procurement_type",
+    "category",
+    "item_name",
+    "specifications",
+    "desired_result",
+    "business_justification",
+}
 MULTIPLIERS = {
     "тыс": Decimal("1000"),
     "тысяч": Decimal("1000"),
@@ -36,7 +44,15 @@ CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
     "G06": ("складское оборудование", "стеллаж", "тележк"),
     "G07": ("погрузчик", "погрузочная техника"),
     "G08": ("спецодежд", "сиз"),
-    "G09": ("хозяйственные товары", "инвентарь"),
+    "G09": (
+        "хозяйственные товары",
+        "хозяйственный инвентарь",
+        "моющие средства",
+        "чистящие средства",
+        "средства для уборки",
+        "губки",
+        "салфетки",
+    ),
     "G10": ("упаковочные материалы", "коробк", "плёнк"),
     "G11": ("готовая полиграфия", "готовые буклеты"),
     "G12": ("pos-материал", "баннер", "стенд"),
@@ -75,13 +91,95 @@ def normalize_search_text(value: str) -> str:
 
 
 def evidence_is_present(source_text: str, evidence: str) -> bool:
-    return normalize_search_text(evidence) in normalize_search_text(source_text)
+    source = " ".join(_evidence_tokens(source_text))
+    candidate = " ".join(_evidence_tokens(evidence))
+    return bool(candidate and candidate in source)
+
+
+def evidence_supports_field(
+    field_name: str,
+    source_text: str,
+    evidence: str,
+) -> bool:
+    if evidence_is_present(source_text, evidence):
+        return True
+    if field_name not in SEMANTIC_EVIDENCE_FIELDS:
+        return False
+    source_tokens = [
+        _light_russian_stem(token)
+        for token in _evidence_tokens(source_text)
+        if not token.isdigit()
+    ]
+    evidence_tokens = [
+        _light_russian_stem(token)
+        for token in _evidence_tokens(evidence)
+        if not token.isdigit()
+    ]
+    if not evidence_tokens:
+        return False
+    width = len(evidence_tokens)
+    return any(
+        source_tokens[index : index + width] == evidence_tokens
+        for index in range(len(source_tokens) - width + 1)
+    )
 
 
 def fact_requires_evidence(field_name: str, value: object) -> bool:
     if field_name in BOOLEAN_FACT_FIELDS:
         return value is True
     return value is not None
+
+
+def _evidence_tokens(value: str) -> list[str]:
+    normalized = normalize_search_text(value)
+    return re.findall(r"[a-zа-я0-9]+", normalized)
+
+
+def _light_russian_stem(value: str) -> str:
+    if not re.fullmatch(r"[а-я]+", value) or len(value) < 5:
+        return value
+    suffixes = (
+        "иями",
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ому",
+        "ыми",
+        "ими",
+        "ую",
+        "юю",
+        "ая",
+        "яя",
+        "ый",
+        "ий",
+        "ой",
+        "ое",
+        "ее",
+        "ых",
+        "их",
+        "ов",
+        "ев",
+        "ей",
+        "ом",
+        "ем",
+        "ам",
+        "ям",
+        "ах",
+        "ях",
+        "ы",
+        "и",
+        "а",
+        "я",
+        "у",
+        "ю",
+        "е",
+    )
+    for suffix in suffixes:
+        minimum_root = 3 if len(suffix) > 1 else 4
+        if value.endswith(suffix) and len(value) - len(suffix) >= minimum_root:
+            return value[: -len(suffix)]
+    return value
 
 
 def normalize_money(value: str) -> MoneyExtraction:

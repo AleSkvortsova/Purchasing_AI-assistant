@@ -133,9 +133,16 @@ def test_invalid_amount_is_rejected(amount) -> None:
         ApprovalContext(amount=amount, budget_status="budgeted")
 
 
-def test_unknown_budget_status_is_rejected() -> None:
-    with pytest.raises(ValidationError):
-        ApprovalContext(amount="1", budget_status="unknown")
+def test_unknown_budget_status_returns_unresolved_route_without_rule_lookup(
+    service: ApprovalRuleService,
+) -> None:
+    result = service.evaluate(ApprovalContext(amount="1", budget_status="unknown"))
+    assert result.status == "needs_clarification"
+    assert result.base_rule_code is None
+    assert result.final_approvers == []
+    assert result.missing_fields == []
+    assert result.clarification_questions
+    assert result.warnings
 
 
 def test_context_normalizes_category_and_urgency() -> None:

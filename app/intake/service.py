@@ -64,6 +64,13 @@ class RequestIntakeService:
                         )
                     )
         completeness = self.completeness_service.evaluate(current, invalid)
+        if "quantity" in update.suppressed_extraction_fields:
+            clarifications.setdefault(
+                "quantity",
+                "В сообщении указано несколько товарных позиций. Уточните "
+                "количество для одной позиции или оформите разные позиции "
+                "отдельными заявками.",
+            )
         approval_context = self._approval_context(current)
         approval_route = (
             self.approval_rule_service.evaluate(approval_context)

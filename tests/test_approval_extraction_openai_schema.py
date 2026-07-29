@@ -13,13 +13,26 @@ from scripts import validate_approval_extraction_schema as schema_cli
 
 def _payload_data() -> dict:
     return {
+        "procurement_type_raw": None,
+        "item_name_raw": None,
+        "quantity_raw": None,
+        "unit_raw": None,
+        "specifications_raw": None,
+        "desired_result_raw": None,
         "amount_raw": "600 тысяч",
+        "amount_modifier_raw": None,
+        "billing_period_raw": None,
         "budget_status_raw": "budgeted",
         "urgency_raw": None,
         "single_supplier_raw": True,
         "category_raw": "S11",
         "has_data_access_raw": None,
         "work_on_site_raw": None,
+        "desired_delivery_date_raw": None,
+        "delivery_location_raw": None,
+        "business_justification_raw": None,
+        "department_raw": None,
+        "contact_person_raw": None,
         "urgency_claimed": False,
         "confidence_items": [
             {"field_name": "amount", "confidence": 0.95},
@@ -77,6 +90,19 @@ def test_nullable_fields_are_required_and_allow_null() -> None:
         "category_raw",
         "has_data_access_raw",
         "work_on_site_raw",
+        "procurement_type_raw",
+        "item_name_raw",
+        "quantity_raw",
+        "unit_raw",
+        "specifications_raw",
+        "desired_result_raw",
+        "amount_modifier_raw",
+        "billing_period_raw",
+        "desired_delivery_date_raw",
+        "delivery_location_raw",
+        "business_justification_raw",
+        "department_raw",
+        "contact_person_raw",
     }
 
     for field_name in nullable_fields:
@@ -137,7 +163,7 @@ def test_unknown_field_name_is_rejected(collection: str) -> None:
 def test_schema_cli_reports_property_count(capsys) -> None:
     assert schema_cli.main() == 0
     assert capsys.readouterr().out == (
-        "properties: 12\nstatus: compatible\n"
+        "properties: 25\nstatus: compatible\n"
     )
 
 

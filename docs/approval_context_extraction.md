@@ -32,7 +32,12 @@ OpenAI provider использует Responses API и Structured Outputs с от
 строгой DTO `OpenAIApprovalExtractionPayload`, которая затем преобразуется во
 внутреннюю `RawApprovalExtraction`. Схема содержит сырые сумму, бюджетный
 статус, срочность, признаки единственного поставщика, доступа к данным и работ
-на объекте, категорию, confidence, unknown fields и contradictions.
+на объекте, категорию, confidence, unknown fields и contradictions. Та же DTO
+расширена обязательными nullable intake-полями для Telegram: только
+`goods | service`, предмет, количество/единица, характеристики, результат,
+исходное выражение даты, модификатор и период суммы, место и обоснование. DTO
+остаётся транспортной; доменная валидация выполняется после преобразования в
+`RawApprovalExtraction`.
 
 Для каждого извлечённого факта provider возвращает короткий фрагмент исходного
 текста. Service нормализует регистр и пробелы и проверяет, что evidence
@@ -43,6 +48,14 @@ Evidence обязательно для положительного или ко�
 суммы, бюджетного статуса, приоритета, категории и bool-значения `true`.
 Значения `null` и bool-значения `false`, полученные из отсутствия упоминания,
 не требуют evidence.
+
+Для Telegram intake политика зависит от типа поля. Сумма, дата, количество,
+единица, бюджетный статус и место требуют прямого исходного span. Для
+смысловых полей допустим нормализованный span с приведением регистра, `ё/е`,
+пунктуации, кавычек и безопасных русских падежных окончаний. Произвольное fuzzy
+matching не используется. Для derived `category_code` evidence указывает
+исходный предмет или действие; отдельно проверяются существование кода,
+совместимость G01–G15 с `goods` и S01–S15 с `service`, а также confidence.
 
 ## Матрица обязательности полей
 
@@ -179,6 +192,9 @@ python scripts/evaluate_approval_extraction.py --offline --show-failures
 категории, boolean F1, complete context, clarification и contradiction
 accuracy. OpenAI evaluation выполняется только при явном `--provider openai`
 без `--offline`.
+
+Отдельный Telegram holdout и его метрики описаны в
+[`telegram_extraction_evaluation.md`](telegram_extraction_evaluation.md).
 
 ## Ограничения MVP
 

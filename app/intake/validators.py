@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.intake.field_registry import RequestFieldRegistry
+from app.intake.field_registry import CATEGORY_NAMES, RequestFieldRegistry
 from app.intake.models import ProcurementType, RequestDraftData
 
 
@@ -50,12 +50,12 @@ class IntakeFieldValidator:
             return result
         if name == "procurement_type":
             normalized = str(value).casefold()
-            if normalized not in {"goods", "service", "work"}:
+            if normalized not in {"goods", "service"}:
                 raise ValueError("Неизвестный тип закупки")
             return ProcurementType(normalized)
         if name == "budget_status":
             normalized = str(value).casefold()
-            if normalized not in {"budgeted", "unbudgeted"}:
+            if normalized not in {"budgeted", "unbudgeted", "unknown"}:
                 raise ValueError("Неизвестный бюджетный статус")
             return normalized
         if name == "urgency":
@@ -65,7 +65,10 @@ class IntakeFieldValidator:
             return normalized
         if name == "category":
             normalized = str(value).upper()
-            return normalized.split(maxsplit=1)[0]
+            code = normalized.split(maxsplit=1)[0]
+            if code not in CATEGORY_NAMES:
+                raise ValueError("Неизвестная категория закупки")
+            return code
         return value
 
     def validate_draft(self, draft: RequestDraftData) -> dict[str, str]:
@@ -95,4 +98,15 @@ class IntakeFieldValidator:
                 )
         if draft.urgency in {"P1", "P2"} and not draft.urgency_justification:
             errors["urgency_justification"] = "Требуется обоснование срочности"
+        if draft.category_code in CATEGORY_NAMES:
+            expected_prefix = (
+                "G" if draft.procurement_type == ProcurementType.GOODS else "S"
+            )
+            if (
+                draft.procurement_type is not None
+                and not draft.category_code.startswith(expected_prefix)
+            ):
+                errors["category_code"] = (
+                    "Категория не соответствует типу закупки"
+                )
         return errors

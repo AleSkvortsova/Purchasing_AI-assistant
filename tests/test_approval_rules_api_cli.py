@@ -67,6 +67,21 @@ def test_api_returns_clarification_without_budget_status(
     assert response.json()["status"] == "needs_clarification"
 
 
+def test_api_returns_unresolved_route_for_explicit_unknown_budget(
+    rule_service: ApprovalRuleService,
+) -> None:
+    app.dependency_overrides[get_approval_rule_service] = lambda: rule_service
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/approval-rules/evaluate",
+            json={"amount": "180000", "budget_status": "unknown"},
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "needs_clarification"
+    assert response.json()["final_approvers"] == []
+    assert response.json()["warnings"]
+
+
 def test_api_rejects_negative_amount(
     rule_service: ApprovalRuleService,
 ) -> None:
@@ -122,6 +137,25 @@ def test_cli_json_output(
     assert exit_code == 0
     assert output["status"] == "resolved"
     assert output["base_rule_code"] == "BUDGETED_100000_01_500000"
+
+
+def test_cli_accepts_unknown_budget_without_selecting_route(
+    monkeypatch,
+    capsys,
+    rule_service: ApprovalRuleService,
+) -> None:
+    monkeypatch.setattr(
+        evaluate_approval_route,
+        "build_service",
+        lambda: rule_service,
+    )
+    exit_code = evaluate_approval_route.main(
+        ["--amount", "180000", "--budget-status", "unknown", "--json"]
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["status"] == "needs_clarification"
+    assert output["final_approvers"] == []
 
 
 def test_rule_engine_does_not_need_openai_or_rag(

@@ -23,6 +23,18 @@ class ApprovalRuleService:
                     "Закупка предусмотрена бюджетом или является внебюджетной?"
                 ],
             )
+        if context.budget_status == "unknown":
+            return ApprovalRouteResult(
+                status="needs_clarification",
+                clarification_questions=[
+                    "Бюджетный статус заявки должен быть проверен "
+                    "закупщиком или финансовым контролёром."
+                ],
+                warnings=[
+                    "Бюджетный статус не определён; автоматический маршрут "
+                    "согласования не выбран."
+                ],
+            )
 
         base_rules = self._repository.get_matching_base_rules(
             context.amount,

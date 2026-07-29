@@ -3,11 +3,69 @@ from decimal import Decimal
 import pytest
 
 from app.extraction.normalization import (
+    CATEGORY_ALIASES,
+    compact_category_reference,
+    evidence_supports_field,
     match_category,
     normalize_budget_status,
     normalize_money,
     normalize_urgency,
 )
+from app.intake.field_registry import CATEGORY_NAMES
+
+
+def test_compact_category_reference_describes_g09_cleaning_goods() -> None:
+    reference = compact_category_reference()
+
+    g09 = next(line for line in reference.splitlines() if "G09" in line)
+    assert "моющие" in g09
+    assert "хозяйственный инвентарь" in g09
+
+
+def test_category_codes_and_names_match_compact_knowledge_source() -> None:
+    rows = {}
+    for line in compact_category_reference().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows[cells[0]] = cells[1]
+
+    assert rows == CATEGORY_NAMES
+    assert set(CATEGORY_ALIASES) == set(CATEGORY_NAMES)
+
+
+@pytest.mark.parametrize(
+    ("source", "evidence"),
+    [
+        ("Купить 12 паллет для склада", "паллеты для склада"),
+        ("Закупить офисную мебель", "офисная мебель"),
+        ("Клининг в новом офисе", "новый офис"),
+    ],
+)
+def test_semantic_evidence_supports_safe_russian_word_forms(
+    source: str,
+    evidence: str,
+) -> None:
+    assert evidence_supports_field("item_name", source, evidence)
+
+
+def test_derived_category_requires_a_supported_source_phrase() -> None:
+    assert evidence_supports_field(
+        "category", "Заказать доставку 12 паллет", "доставка 12 паллет"
+    )
+    assert not evidence_supports_field(
+        "category", "Купить бумагу", "доставка паллет"
+    )
+
+
+def test_direct_numeric_evidence_does_not_use_morphological_matching() -> None:
+    assert not evidence_supports_field("unit", "Купить 12 паллет", "шт.")
+
+
+def test_delivery_location_still_requires_direct_source_span() -> None:
+    assert not evidence_supports_field(
+        "delivery_location", "Клининг в новом офисе", "новый офис"
+    )
 
 
 @pytest.mark.parametrize(

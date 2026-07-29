@@ -313,6 +313,10 @@ def _fingerprint(update: IntakeFieldUpdate, request_id: UUID | None) -> str:
             "source": update.source.value,
             "explicit_correction": update.explicit_correction,
             "evidence_by_field": update.evidence_by_field,
+            "suppressed_extraction_fields": update.suppressed_extraction_fields,
+            "answered_field_code": update.answered_field_code,
+            "resolve_conflict_id": update.resolve_conflict_id,
+            "conflict_resolution": update.conflict_resolution,
         },
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()

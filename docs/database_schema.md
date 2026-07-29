@@ -54,6 +54,13 @@ registration timestamps/actor. Отмена до регистрации пере
 `cancelled` без номера. Тип заявки может быть `product`, `service` или `NULL`,
 пока черновик не заполнен.
 
+Колонка `request_type` имеет тип `text`, но ограничена CHECK constraint
+значениями `product`, `service` и `NULL`. Канонический
+`data.intake.draft.procurement_type` использует только `goods` и `service`;
+JSONB технически не имеет отдельного SQL constraint. Старое значение `work`,
+если оно осталось в JSON, можно посчитать без изменений данных запросом
+`scripts/sql/check_legacy_work_records.sql`.
+
 Поле `data` хранит изменяемые категорийные поля заявки в JSONB. Канонический
 источник актуальных значений intake — `data.intake.draft`. Верхнеуровневые
 колонки и legacy-ключи `data` являются синхронизированными проекциями.

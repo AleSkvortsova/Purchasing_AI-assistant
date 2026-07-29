@@ -26,7 +26,7 @@ from app.extraction.models import RawApprovalExtraction
 from app.extraction.normalization import (
     MultipleMoneyRangesError,
     compact_category_reference,
-    evidence_is_present,
+    evidence_supports_field,
     fact_requires_evidence,
     match_category,
     normalize_budget_status,
@@ -120,16 +120,34 @@ class OpenAIApprovalExtractionProvider:
                         error_type="OpenAIUnparsedResponseError",
                     )
                 parsed = payload.to_raw_extraction()
-                invalid_evidence = _invalid_evidence_fields(text, parsed)
-                if invalid_evidence:
+                evidence_issues = _evidence_validation_issues(text, parsed)
+                rejected_fields = {
+                    field
+                    for field in evidence_issues
+                    if field in _FIELD_LEVEL_EVIDENCE_REJECTION
+                }
+                if rejected_fields:
+                    parsed = _without_unsupported_fields(parsed, rejected_fields)
+                    self.last_metadata["evidence_rejection_codes"] = {
+                        field: evidence_issues[field]
+                        for field in sorted(rejected_fields)
+                    }
+                fatal_issues = {
+                    field: code
+                    for field, code in evidence_issues.items()
+                    if field not in rejected_fields
+                }
+                if fatal_issues:
                     raise _diagnostic_error(
                         "OpenAI structured output failed evidence validation",
                         response=response,
                         error_type="ApprovalEvidenceValidationError",
+                        diagnostic_code="evidence_validation_failed",
                         validation_errors=[
                             f"{field}: evidence not present in input"
-                            for field in invalid_evidence
+                            for field in sorted(fatal_issues)
                         ],
+                        validation_error_codes=fatal_issues,
                     )
                 return parsed
             except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
@@ -193,6 +211,7 @@ class OpenAIApprovalExtractionProvider:
                 raise _diagnostic_error(
                     "OpenAI structured output failed schema validation",
                     exc=exc,
+                    diagnostic_code=_schema_validation_code(fields),
                     validation_errors=fields or ["unknown"],
                 ) from exc
             except ApprovalExtractionProviderError:
@@ -220,6 +239,8 @@ def _diagnostic_error(
     error_type: str | None = None,
     incomplete_reason: str | None = None,
     validation_errors: list[str] | None = None,
+    diagnostic_code: str | None = None,
+    validation_error_codes: dict[str, str] | None = None,
 ) -> ApprovalExtractionProviderError:
     source = (
         response
@@ -263,6 +284,8 @@ def _diagnostic_error(
         response_status=_safe_optional_string(response_status),
         incomplete_reason=_safe_optional_string(reason),
         validation_errors=validation_errors,
+        diagnostic_code=diagnostic_code,
+        validation_error_codes=validation_error_codes,
     )
 
 
@@ -289,6 +312,14 @@ def _safe_int(value: object | None) -> int | None:
         return None if value is None else int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _schema_validation_code(fields: list[str]) -> str:
+    if any("confidence" in field for field in fields):
+        return "invalid_confidence"
+    if any("field_name" in field for field in fields):
+        return "invalid_field_reference"
+    return "dto_schema_mismatch"
 
 
 def _response_error_value(response: object | None, key: str) -> object | None:
@@ -364,10 +395,10 @@ def _incomplete_reason(response: object) -> object | None:
     return getattr(details, "reason", None)
 
 
-def _invalid_evidence_fields(
+def _evidence_validation_issues(
     source_text: str,
     parsed: RawApprovalExtraction,
-) -> list[str]:
+) -> dict[str, str]:
     facts = {
         "amount": parsed.amount_raw,
         "budget_status": parsed.budget_status_raw,
@@ -377,18 +408,79 @@ def _invalid_evidence_fields(
         "category": parsed.category_raw,
         "has_data_access": parsed.has_data_access_raw,
         "work_on_site": parsed.work_on_site_raw,
+        "procurement_type": parsed.procurement_type_raw,
+        "item_name": parsed.item_name_raw,
+        "quantity": parsed.quantity_raw,
+        "unit": parsed.unit_raw,
+        "specifications": parsed.specifications_raw,
+        "desired_result": parsed.desired_result_raw,
+        "amount_modifier": parsed.amount_modifier_raw,
+        "billing_period": parsed.billing_period_raw,
+        "desired_delivery_date": parsed.desired_delivery_date_raw,
+        "delivery_location": parsed.delivery_location_raw,
+        "business_justification": parsed.business_justification_raw,
+        "department": parsed.department_raw,
+        "contact_person": parsed.contact_person_raw,
     }
-    invalid: set[str] = set()
+    invalid: dict[str, str] = {}
     for field, evidence in parsed.evidence_by_field.items():
-        if not evidence or not evidence_is_present(source_text, evidence):
-            invalid.add(field)
+        if field not in facts:
+            invalid[field] = "invalid_field_reference"
+        elif not evidence:
+            invalid[field] = "missing_evidence"
+        elif not evidence_supports_field(field, source_text, evidence):
+            invalid[field] = "unsupported_evidence"
     for field, value in facts.items():
         evidence = parsed.evidence_by_field.get(field)
-        if fact_requires_evidence(field, value) and (
-            not evidence or not evidence_is_present(source_text, evidence)
-        ):
-            invalid.add(field)
-    return sorted(invalid)
+        if not fact_requires_evidence(field, value):
+            continue
+        if not evidence:
+            invalid[field] = "missing_evidence"
+        elif not evidence_supports_field(field, source_text, evidence):
+            invalid[field] = "unsupported_evidence"
+    return dict(sorted(invalid.items()))
+
+
+_FIELD_LEVEL_EVIDENCE_REJECTION = {
+    "procurement_type",
+    "category",
+    "item_name",
+    "specifications",
+    "desired_result",
+    "business_justification",
+    "unit",
+}
+_RAW_FIELD_BY_EVIDENCE_FIELD = {
+    "procurement_type": "procurement_type_raw",
+    "category": "category_raw",
+    "item_name": "item_name_raw",
+    "specifications": "specifications_raw",
+    "desired_result": "desired_result_raw",
+    "business_justification": "business_justification_raw",
+    "unit": "unit_raw",
+}
+
+
+def _without_unsupported_fields(
+    parsed: RawApprovalExtraction,
+    fields: set[str],
+) -> RawApprovalExtraction:
+    changes = {
+        _RAW_FIELD_BY_EVIDENCE_FIELD[field]: None
+        for field in fields
+        if field in _RAW_FIELD_BY_EVIDENCE_FIELD
+    }
+    changes["confidence_by_field"] = {
+        key: value
+        for key, value in parsed.confidence_by_field.items()
+        if key not in fields
+    }
+    changes["evidence_by_field"] = {
+        key: value
+        for key, value in parsed.evidence_by_field.items()
+        if key not in fields
+    }
+    return parsed.model_copy(update=changes)
 
 
 class FakeApprovalExtractionProvider:

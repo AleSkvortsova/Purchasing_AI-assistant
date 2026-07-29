@@ -1,3 +1,4 @@
+import logging
 from copy import deepcopy
 from typing import Any
 
@@ -21,6 +22,7 @@ INTAKE_SCHEMA_VERSION = 1
 _DRAFT_META_FIELDS = {"field_states", "conflicts", "warnings"}
 _NON_VALUE_FIELDS = {"request_id", "requester_id", *_DRAFT_META_FIELDS}
 _LEGACY_FIELD_ALIASES = {"required_date": "desired_delivery_date"}
+logger = logging.getLogger(__name__)
 
 
 class IntakePersistenceMapper:
@@ -61,6 +63,25 @@ class IntakePersistenceMapper:
             request.request_type,
             payload.get("procurement_type"),
         )
+        field_states = payload.get("field_states")
+        if isinstance(field_states, dict):
+            procurement_state = field_states.get("procurement_type")
+            if (
+                isinstance(procurement_state, dict)
+                and procurement_state.get("value") == "work"
+            ):
+                normalized_states = deepcopy(field_states)
+                normalized_states["procurement_type"]["value"] = (
+                    ProcurementType.SERVICE.value
+                )
+                previous = normalized_states["procurement_type"].get(
+                    "previous_value"
+                )
+                if previous == "work":
+                    normalized_states["procurement_type"]["previous_value"] = (
+                        ProcurementType.SERVICE.value
+                    )
+                payload["field_states"] = normalized_states
         try:
             return RequestDraftData.model_validate(payload)
         except ValidationError as exc:
@@ -155,7 +176,7 @@ class IntakePersistenceMapper:
             return None
         if value == ProcurementType.GOODS:
             return RequestType.PRODUCT
-        if value in {ProcurementType.SERVICE, ProcurementType.WORK}:
+        if value == ProcurementType.SERVICE:
             return RequestType.SERVICE
         raise IntakePersistenceMappingError(f"Unknown intake type: {value}")
 
@@ -165,6 +186,12 @@ class IntakePersistenceMapper:
         persisted_intake_type: str | None = None,
     ) -> ProcurementType | None:
         if persisted_intake_type is not None:
+            if persisted_intake_type == "work":
+                logger.warning(
+                    "Normalized legacy procurement_type 'work' to 'service' "
+                    "while reading persisted intake draft"
+                )
+                return ProcurementType.SERVICE
             try:
                 return ProcurementType(persisted_intake_type)
             except ValueError as exc:

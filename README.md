@@ -14,15 +14,15 @@ Backend MVP этапа intake и request lifecycle завершён и пров�
 
 Также работают OpenAI extraction layer, embeddings, хранение чанков в
 Supabase/pgvector, идемпотентная индексация и hybrid retrieval через CLI и API.
-Это завершение backend milestone, а не всего продукта: Telegram adapter,
-пользовательский E2E через Telegram, интерфейс закупщика и фактическое
-исполнение согласований ещё не реализованы.
+Это завершение backend milestone, а не всего продукта: Telegram adapter
+поддерживает intake, карточку и lifecycle-действия; production E2E через Telegram,
+интерфейс закупщика и фактическое исполнение согласований ещё не реализованы.
 
 ## Границы MVP
 
 Утверждённые продуктовые границы и критерии готовности описаны в
-[MVP_SCOPE.md](MVP_SCOPE.md). Следующий незавершённый этап — Telegram adapter
-MVP.
+[MVP_SCOPE.md](MVP_SCOPE.md). Следующий незавершённый этап — production-ready
+пилот Telegram с transport authentication и эксплуатационными настройками.
 
 ## Архитектура backend MVP
 
@@ -39,7 +39,7 @@ MVP.
   locking и idempotency;
 - OpenAI extraction layer извлекает факты, но итоговые статусы и правила
   определяются детерминированным кодом;
-- будущий Telegram adapter станет transport-слоем поверх готового backend.
+- Telegram adapter служит тонким transport-слоем поверх backend.
 
 ## Требования
 
@@ -82,6 +82,7 @@ python -m pip install -e ".[dev]"
 ```dotenv
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-backend-only-service-role-key
+TELEGRAM_BOT_TOKEN=your-bot-token
 DATABASE_URL=
 OPENAI_API_KEY=your-openai-api-key
 EMBEDDING_MODEL=text-embedding-3-small
@@ -109,6 +110,23 @@ uvicorn app.main:app --reload
 ```
 
 Сервис будет доступен по адресу `http://127.0.0.1:8000`.
+
+Минимальный Telegram adapter запускается отдельно через long polling:
+
+```powershell
+python -m app.bot
+```
+
+Для него нужны `TELEGRAM_BOT_TOKEN` и серверная конфигурация Supabase. Токен
+не требуется при импорте модулей или запуске тестов. При наличии
+`OPENAI_API_KEY` Telegram по умолчанию работает в `hybrid`, без ключа — в
+`rule`. В OpenAI-first `hybrid` structured provider отвечает за смысловые поля,
+а deterministic parser — за точные
+числа, даты, явный бюджетный статус и консервативный fallback. Явная настройка —
+`TELEGRAM_EXTRACTION_MODE=rule|openai|hybrid`. Во всех режимах показываются
+только «Товар» и «Услуга», а validators и intake core остаются источником
+истины. Подробнее:
+[`docs/telegram_adapter.md`](docs/telegram_adapter.md).
 
 ## Проверка health
 
@@ -310,7 +328,7 @@ app/
 ├── api/             # HTTP routers и dependency injection
 ├── core/            # настройки и логирование
 ├── extraction/      # structured extraction, normalization и orchestration
-├── bot/             # будущая Telegram-интеграция
+├── bot/             # тонкий Telegram adapter и long-polling entrypoint
 ├── llm/             # будущая LLM-интеграция
 ├── intake/          # детерминированное ядро intake-диалога
 ├── rag/             # embeddings, индексация, FTS и hybrid retrieval
@@ -332,9 +350,13 @@ pyproject.toml       # зависимости и настройки инстру
 
 ## Следующие этапы
 
-Следующий этап — **Telegram adapter MVP**. Пока не реализованы Telegram bot,
-полный пользовательский E2E, интерфейс закупщика, фактическое исполнение
-согласований, production transport authentication, production deployment,
-генерация RAG-ответа и reranker.
+Реализован **Telegram adapter MVP**: long-polling transport, `/start`, главное
+меню, привязка `telegram_id`, OpenAI-first extraction с консервативным
+deterministic fallback,
+контекстные вопросы,
+карточка заявки и lifecycle-кнопки confirm/edit/cancel поверх существующих
+backend services. Полный production E2E, интерфейс
+закупщика, фактическое исполнение согласований, production deployment,
+генерация RAG-ответа и reranker пока не реализованы.
 Перед реальным пилотом необходимо включить RLS и определить политики
 минимальных прав.

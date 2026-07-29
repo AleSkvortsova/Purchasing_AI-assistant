@@ -115,6 +115,38 @@ def test_confirmation_view_incomplete_conflict_and_ownership() -> None:
     assert conflict.confirmable is False
 
 
+def test_unknown_budget_completes_intake_but_blocks_confirm() -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values["budget_status"] = "unknown"
+    saved = intake.process_structured_step(
+        USER_ID,
+        update,
+        idempotency_key="unknown-budget-intake",
+    )
+    assert saved.intake_result.status == IntakeStatus.READY_FOR_CONFIRMATION
+
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+    view = lifecycle.get_confirmation_view(saved.request_id, USER_ID)
+    assert view.confirmable is False
+    assert view.approval_route is not None
+    assert view.approval_route.status == "needs_clarification"
+    assert "Маршрут согласования не разрешён" in view.blocking_reasons
+    with pytest.raises(RequestNotReadyError):
+        lifecycle.confirm_request(
+            saved.request_id,
+            USER_ID,
+            saved.request_version,
+            "confirm-unknown-budget",
+        )
+
+
 def test_confirm_registers_snapshot_dialog_logs_and_replay() -> None:
     storage, intake, lifecycle, saved = ready_fixture()
     storage.requests[saved.request_id].data["unrelated"] = {"preserved": True}

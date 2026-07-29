@@ -78,8 +78,7 @@ def _urgent(draft: RequestDraftData) -> bool:
 
 def _physical_location_required(draft: RequestDraftData) -> bool:
     return (
-        draft.procurement_type == ProcurementType.WORK
-        or (
+        (
             draft.procurement_type == ProcurementType.GOODS
             and draft.category_code != "G05"
         )
@@ -186,12 +185,12 @@ def _definitions() -> list[FieldDefinition]:
         _f(
             "procurement_type",
             "Тип закупки",
-            "Это товар, услуга или работа?",
+            "Это товар или услуга?",
             10,
             10,
             validator_name="procurement_type",
             question_type="choice",
-            options=("goods", "service", "work"),
+            options=("goods", "service"),
             **always,
         ),
         _f(
@@ -211,7 +210,6 @@ def _definitions() -> list[FieldDefinition]:
             required_scope="type",
             required_for_procurement_types=(
                 ProcurementType.SERVICE,
-                ProcurementType.WORK,
             ),
         ),
         _f(
@@ -255,7 +253,6 @@ def _definitions() -> list[FieldDefinition]:
             required_for_procurement_types=(
                 ProcurementType.GOODS,
                 ProcurementType.SERVICE,
-                ProcurementType.WORK,
             ),
         ),
         _f(
@@ -315,7 +312,7 @@ def _definitions() -> list[FieldDefinition]:
             140,
             validator_name="budget_status",
             question_type="choice",
-            options=("budgeted", "unbudgeted"),
+            options=("budgeted", "unbudgeted", "unknown"),
             **always,
         ),
         _f(

@@ -1,0 +1,939 @@
+import logging
+from dataclasses import dataclass, replace
+from hashlib import sha256
+from typing import Protocol
+from uuid import UUID
+
+from app.bot.categories import DeterministicCategoryClassifier
+from app.bot.formatters import (
+    ACTIVE_DRAFT_NOTICE,
+    EXAMPLES_TEXT,
+    HELP_TEXT,
+    NEW_REQUEST_PROMPT,
+    WELCOME_TEXT,
+    card_actions,
+    format_current_summary,
+    format_intake_result,
+    format_question,
+)
+from app.bot.keyboards import (
+    MENU_CURRENT,
+    MENU_EXAMPLES,
+    MENU_HELP,
+    MENU_NEW,
+    active_draft_actions,
+    budget_choices,
+    cancel_confirmation,
+    new_request_action,
+    parse_callback,
+)
+from app.bot.parser import DeterministicIntakeParser, TelegramParseError
+from app.bot.users import ResolvedTelegramUser
+from app.extraction.intake import (
+    TelegramExtractionMode,
+    TelegramIntakeExtractionService,
+)
+from app.intake.models import IntakeFieldUpdate, IntakeStatus, UpdateSource
+from app.intake_persistence.exceptions import (
+    ActiveDraftNotFoundError,
+    ConcurrentIntakeUpdateError,
+)
+from app.intake_persistence.models import (
+    MessageEnvelope,
+    PersistentIntakeStepResult,
+)
+from app.request_lifecycle.exceptions import (
+    LifecycleConcurrentUpdateError,
+    LifecycleOwnershipError,
+    LifecyclePersistenceError,
+    LifecycleRequestNotFoundError,
+    LifecycleTransitionError,
+    RequestAlreadyCancelledError,
+    RequestAlreadyRegisteredError,
+    RequestNotReadyError,
+)
+from app.request_lifecycle.models import LifecycleCommandResult
+from app.schemas.common import RequestStatus
+
+logger = logging.getLogger(__name__)
+
+_DEBUG_SCALAR_FIELDS = {
+    "quantity",
+    "unit",
+    "amount",
+    "desired_delivery_date",
+}
+
+_ACCEPT_CONFLICT_REPLIES = {
+    "подтвердить",
+    "да",
+    "изменить",
+    "применить",
+    "новое значение",
+    "подтвердить изменение",
+}
+_KEEP_CONFLICT_REPLIES = {
+    "оставить",
+    "оставить прежнее",
+    "не менять",
+    "нет",
+    "отменить изменение",
+    "прежнее значение",
+}
+
+
+class IntakeOrchestrator(Protocol):
+    def get_active_session(self, user_id: UUID | str) -> PersistentIntakeStepResult: ...
+
+    def process_structured_step(
+        self,
+        user_id: UUID | str,
+        update: IntakeFieldUpdate,
+        request_id: UUID | None = None,
+        incoming_message: MessageEnvelope | None = None,
+        idempotency_key: str | None = None,
+    ) -> PersistentIntakeStepResult: ...
+
+
+class LifecycleService(Protocol):
+    def get_confirmation_view(self, request_id, user_id): ...
+
+    def confirm_request(
+        self, request_id, user_id, expected_version, idempotency_key
+    ) -> LifecycleCommandResult: ...
+
+    def return_to_editing(
+        self, request_id, user_id, expected_version, idempotency_key
+    ) -> LifecycleCommandResult: ...
+
+    def cancel_draft(
+        self,
+        request_id,
+        user_id,
+        expected_version,
+        idempotency_key,
+        reason=None,
+    ) -> LifecycleCommandResult: ...
+
+
+@dataclass(frozen=True)
+class TelegramIntakeOutcome:
+    text: str
+    idempotency_key: str
+    update: IntakeFieldUpdate
+    result: PersistentIntakeStepResult | None = None
+    reply_markup: object | None = None
+    replayed: bool = False
+
+
+class TelegramIntakeAdapter:
+    def __init__(
+        self,
+        orchestrator: IntakeOrchestrator,
+        parser: DeterministicIntakeParser | None = None,
+        category_classifier: DeterministicCategoryClassifier | None = None,
+        lifecycle_service: LifecycleService | None = None,
+        structured_extractor: TelegramIntakeExtractionService | None = None,
+        extraction_mode: TelegramExtractionMode = "rule",
+        extraction_debug: bool = False,
+    ) -> None:
+        self._orchestrator = orchestrator
+        self._categories = category_classifier or DeterministicCategoryClassifier()
+        self._parser = parser or DeterministicIntakeParser(
+            category_classifier=self._categories
+        )
+        self._lifecycle = lifecycle_service
+        self._structured_extractor = structured_extractor
+        self._extraction_mode = extraction_mode
+        self._extraction_debug = extraction_debug
+        self._extraction_cache: dict[str, IntakeFieldUpdate] = {}
+        self._message_outcome_cache: dict[str, TelegramIntakeOutcome] = {}
+        self._awaiting_new_request_description: set[UUID] = set()
+
+    def start_message(self, user_id: UUID) -> str:
+        active = self._active_or_none(user_id)
+        if active is None:
+            return WELCOME_TEXT
+        return WELCOME_TEXT + "\n\n" + ACTIVE_DRAFT_NOTICE
+
+    def handle_menu(
+        self,
+        user: ResolvedTelegramUser | UUID,
+        action: str,
+    ) -> TelegramIntakeOutcome:
+        context = _user_context(user)
+        active = self._active_or_none(context.user_id)
+        if action == MENU_EXAMPLES:
+            return TelegramIntakeOutcome(
+                EXAMPLES_TEXT, "menu:examples", IntakeFieldUpdate()
+            )
+        if action == MENU_HELP:
+            return TelegramIntakeOutcome(HELP_TEXT, "menu:help", IntakeFieldUpdate())
+        if action == MENU_CURRENT:
+            if active is None:
+                return TelegramIntakeOutcome(
+                    "Сейчас у вас нет незавершённой заявки.",
+                    "menu:current",
+                    IntakeFieldUpdate(),
+                )
+            return self._current_outcome(active, "menu:current")
+        if action == MENU_NEW:
+            if active is None:
+                if context.user_id in self._awaiting_new_request_description:
+                    return TelegramIntakeOutcome(
+                        "Можно отправлять описание новой заявки.",
+                        "menu:new",
+                        IntakeFieldUpdate(),
+                    )
+                self._awaiting_new_request_description.add(context.user_id)
+                return TelegramIntakeOutcome(
+                    NEW_REQUEST_PROMPT,
+                    "menu:new",
+                    IntakeFieldUpdate(),
+                )
+            return TelegramIntakeOutcome(
+                "У вас уже есть незавершённая заявка. Чтобы начать новую, "
+                "текущую нужно сначала отменить.",
+                "menu:new",
+                IntakeFieldUpdate(),
+                active,
+                active_draft_actions(active.request_id, active.request_version),
+            )
+        raise ValueError("Unsupported Telegram menu action")
+
+    def handle_text(
+        self,
+        user: ResolvedTelegramUser | UUID,
+        chat_id: int,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome:
+        context = _user_context(user)
+        user_id = context.user_id
+        key = self.idempotency_key(chat_id, message_id)
+        replayed = self._message_outcome_cache.get(key)
+        if replayed is not None:
+            self._debug_event(
+                key,
+                "duplicate_message_suppressed",
+                outgoing_response_count=0,
+            )
+            return replace(replayed, replayed=True)
+        active = self._active_or_none(user_id)
+        if (
+            active is not None
+            and active.intake_result.status == IntakeStatus.READY_FOR_CONFIRMATION
+            and active.dialog_state.intake_status != IntakeStatus.EDITING
+        ):
+            return self._current_outcome(active, key)
+        if active is not None and active.intake_result.draft.conflicts:
+            return self._handle_pending_conflict(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+            )
+
+        original_missing = active is None
+        original_awaiting = (
+            active.dialog_state.awaiting_field_code if active is not None else None
+        )
+        profile_update = self._profile_update(context, active, original_awaiting)
+        if profile_update.values:
+            active = self._orchestrator.process_structured_step(
+                user_id,
+                profile_update,
+                request_id=active.request_id if active is not None else None,
+                incoming_message=self._envelope(message_id, "telegram_profile"),
+                idempotency_key=f"{key}:profile",
+            )
+
+        question = None
+        awaiting_field_code = None
+        if not original_missing and active is not None:
+            question = (
+                active.dialog_state.next_question or active.intake_result.next_question
+            )
+            awaiting_field_code = active.dialog_state.awaiting_field_code
+        category_candidates = self._category_candidates(active)
+        use_structured = self._should_use_structured_extraction(
+            original_missing=original_missing,
+            active=active,
+            question=question,
+            text=text,
+        )
+        editing = (
+            active is not None
+            and active.dialog_state.intake_status == IntakeStatus.EDITING
+        )
+        try:
+            update = self._parser.parse(
+                text,
+                None if editing else question,
+                None if editing else awaiting_field_code,
+                category_candidates,
+            )
+        except TelegramParseError:
+            if not use_structured:
+                raise
+            update = IntakeFieldUpdate()
+        parsed_update = update
+        self._debug_event(
+            key,
+            "deterministic_extraction",
+            current_question=question.field_code if question else None,
+            candidate_fields=sorted(update.values),
+            scalar_values=_safe_scalar_values(update),
+        )
+        if use_structured:
+            cached = self._extraction_cache.get(key)
+            if cached is None:
+                assert self._structured_extractor is not None
+                resolution = self._structured_extractor.resolve_message(
+                    text,
+                    active.intake_result.draft if active is not None else None,
+                    question,
+                    update,
+                    source_kind=(
+                        "initial_description"
+                        if original_missing
+                        else "clarification_answer"
+                    ),
+                    merge_deterministic=True,
+                    fallback_on_error=True,
+                )
+                assert resolution.update is not None
+                cached = resolution.update
+                if not original_missing and question is not None:
+                    values = dict(cached.values)
+                    evidence = dict(cached.evidence_by_field)
+                    if (
+                        question.field_code not in values
+                        and question.field_code in parsed_update.values
+                    ):
+                        values[question.field_code] = parsed_update.values[
+                            question.field_code
+                        ]
+                        if question.field_code in parsed_update.evidence_by_field:
+                            evidence[question.field_code] = (
+                                parsed_update.evidence_by_field[
+                                    question.field_code
+                                ]
+                            )
+                    cached = cached.model_copy(
+                        update={
+                            "values": values,
+                            "evidence_by_field": evidence,
+                            "source": UpdateSource.USER,
+                            "answered_field_code": (
+                                None
+                                if cached.explicit_correction
+                                else question.field_code
+                            ),
+                        }
+                    )
+                self._remember_extraction(key, cached)
+                if resolution.structured is not None:
+                    structured = resolution.structured
+                    logger.info(
+                        "Telegram extraction succeeded mode=%s proposed=%s "
+                        "accepted=%s rejected=%s conflicts=%s duration_ms=%s "
+                        "prompt_version=%s schema_version=%s",
+                        self._extraction_mode,
+                        structured.proposed_fields,
+                        structured.accepted_fields,
+                        len(structured.rejected_fields),
+                        structured.metadata.get("conflict_count"),
+                        structured.metadata.get("duration_ms"),
+                        structured.metadata.get("prompt_version"),
+                        structured.metadata.get("schema_version"),
+                    )
+                    self._debug_event(
+                        key,
+                        "structured_extraction",
+                        candidate_fields=sorted(structured.update.values),
+                        accepted_fields=sorted(cached.values),
+                        rejected_fields=list(structured.rejected_fields),
+                        rejection_codes={
+                            field_name: "normalization_or_evidence_rejected"
+                            for field_name in structured.rejected_fields
+                        },
+                    )
+                else:
+                    assert resolution.failure is not None
+                    logger.warning(
+                        "Telegram structured extraction fallback mode=%s "
+                        "error_type=%s diagnostic_code=%s",
+                        self._extraction_mode,
+                        resolution.failure.error_type
+                        or resolution.failure.error,
+                        resolution.failure.diagnostic_code,
+                    )
+                    self._debug_event(
+                        key,
+                        "structured_fallback",
+                        rejection_codes=(
+                            resolution.failure.validation_error_codes
+                        ),
+                    )
+            update = cached
+        if (
+            not editing
+            and question is not None
+            and update.source == UpdateSource.USER
+            and not update.explicit_correction
+        ):
+            update = update.model_copy(
+                update={"answered_field_code": question.field_code}
+            )
+        if editing:
+            update = update.model_copy(
+                update={
+                    "source": UpdateSource.USER,
+                    "explicit_correction": True,
+                }
+            )
+        try:
+            result = self._orchestrator.process_structured_step(
+                user_id,
+                update,
+                request_id=active.request_id if active is not None else None,
+                incoming_message=self._envelope(message_id, "telegram"),
+                idempotency_key=key,
+            )
+        except ConcurrentIntakeUpdateError:
+            refreshed = self._active_or_none(user_id)
+            text_result = (
+                "Состояние заявки обновилось. "
+                "Повторите ответ на актуальный вопрос."
+            )
+            if refreshed is not None and refreshed.intake_result.next_question:
+                text_result += "\n\n" + format_question(
+                    refreshed.intake_result.next_question,
+                    refreshed.intake_result.draft.procurement_type,
+                    self._category_candidates(refreshed),
+                )
+            return TelegramIntakeOutcome(text_result, key, update)
+        response = format_intake_result(result, self._category_candidates(result))
+        self._awaiting_new_request_description.discard(user_id)
+        if update.values.get("budget_status") == "unknown":
+            response = (
+                "Хорошо, отмечу, что бюджет нужно уточнить.\n\n" + response
+            )
+        outcome = TelegramIntakeOutcome(
+            response,
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+        self._debug_event(
+            key,
+            "persisted_result",
+            merged_fields=sorted(update.values),
+            completed_fields=sorted(
+                result.intake_result.completeness.completed_fields
+            ),
+            missing_fields=list(result.intake_result.completeness.missing_fields),
+            next_question=(
+                result.intake_result.next_question.field_code
+                if result.intake_result.next_question
+                else None
+            ),
+            outgoing_response_count=1,
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _debug_event(self, message_key: str, event: str, **details: object) -> None:
+        if not self._extraction_debug:
+            return
+        message_ref = sha256(message_key.encode("utf-8")).hexdigest()[:12]
+        logger.info(
+            "Telegram extraction debug message_ref=%s mode=%s event=%s details=%s",
+            message_ref,
+            self._extraction_mode,
+            event,
+            details,
+        )
+
+    def _handle_pending_conflict(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome:
+        conflict = active.intake_result.draft.conflicts[0]
+        resolution = _conflict_resolution(text)
+        if resolution is None:
+            outcome = TelegramIntakeOutcome(
+                "Ответьте «подтвердить», чтобы применить новое значение, "
+                "или «оставить», чтобы сохранить прежнее.",
+                key,
+                IntakeFieldUpdate(),
+                active,
+                card_actions(active),
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+        update = IntakeFieldUpdate(
+            source=UpdateSource.USER,
+            resolve_conflict_id=conflict.id,
+            conflict_resolution=resolution,
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=active.request_id,
+            incoming_message=self._envelope(message_id, "telegram_conflict"),
+            idempotency_key=key,
+        )
+        prefix = (
+            "Новое значение применено."
+            if resolution == "accept"
+            else "Прежнее значение сохранено."
+        )
+        outcome = TelegramIntakeOutcome(
+            prefix
+            + "\n\n"
+            + format_intake_result(result, self._category_candidates(result)),
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def handle_callback(
+        self,
+        user: ResolvedTelegramUser | UUID,
+        callback_query_id: str,
+        data: str | None,
+    ) -> TelegramIntakeOutcome:
+        context = _user_context(user)
+        callback = parse_callback(data)
+        key = (
+            f"telegram-callback:{callback_query_id}:{callback.action}:"
+            f"{callback.request_id.hex}"
+        )
+        if callback.action in {"conflict_accept", "conflict_keep"}:
+            return self._handle_conflict_callback(context, callback, key)
+        if self._lifecycle is None:
+            return self._technical_error(key)
+        try:
+            if callback.action == "menu":
+                self._lifecycle.get_confirmation_view(
+                    callback.request_id, context.user_id
+                )
+                return TelegramIntakeOutcome(
+                    "Выберите действие в главном меню.", key, IntakeFieldUpdate()
+                )
+            if callback.action == "current":
+                self._lifecycle.get_confirmation_view(
+                    callback.request_id, context.user_id
+                )
+                active = self._active_or_none(context.user_id)
+                if active is None or active.request_id != callback.request_id:
+                    return TelegramIntakeOutcome(
+                        "Сейчас у вас нет незавершённой заявки.",
+                        key,
+                        IntakeFieldUpdate(),
+                    )
+                return self._current_outcome(active, key)
+            if callback.action in {"cancel_ask", "cancel_new_ask"}:
+                self._lifecycle.get_confirmation_view(
+                    callback.request_id, context.user_id
+                )
+                return TelegramIntakeOutcome(
+                    "Отменить эту заявку? Введённые данные останутся в "
+                    "истории, но продолжить оформление будет нельзя.",
+                    key,
+                    IntakeFieldUpdate(),
+                    reply_markup=cancel_confirmation(
+                        callback.request_id,
+                        callback.version,
+                        start_new=callback.action == "cancel_new_ask",
+                    ),
+                )
+            if callback.action == "confirm":
+                confirmed = self._lifecycle.confirm_request(
+                    callback.request_id,
+                    context.user_id,
+                    callback.version,
+                    key,
+                )
+                if confirmed.replayed:
+                    text = "Эта заявка уже зарегистрирована."
+                else:
+                    self._awaiting_new_request_description.add(context.user_id)
+                    text = (
+                        "Заявка зарегистрирована.\n\n"
+                        f"Номер заявки: {confirmed.request_number}\n\n"
+                        + NEW_REQUEST_PROMPT
+                    )
+                return TelegramIntakeOutcome(
+                    text,
+                    key,
+                    IntakeFieldUpdate(),
+                )
+            if callback.action == "edit":
+                self._lifecycle.return_to_editing(
+                    callback.request_id,
+                    context.user_id,
+                    callback.version,
+                    key,
+                )
+                return TelegramIntakeOutcome(
+                    "Хорошо, заявку можно изменить. Напишите, что именно "
+                    "нужно исправить.",
+                    key,
+                    IntakeFieldUpdate(),
+                )
+            if callback.action == "budget":
+                edited = self._lifecycle.return_to_editing(
+                    callback.request_id,
+                    context.user_id,
+                    callback.version,
+                    key,
+                )
+                return TelegramIntakeOutcome(
+                    "Эта закупка предусмотрена в утверждённом бюджете?",
+                    key,
+                    IntakeFieldUpdate(),
+                    reply_markup=budget_choices(edited.request_id, edited.version),
+                )
+            if callback.action in {"budget_yes", "budget_no", "budget_unknown"}:
+                return self._handle_budget_callback(context, callback, key)
+            if callback.action in {"cancel_yes", "cancel_new_yes"}:
+                cancelled = self._lifecycle.cancel_draft(
+                    callback.request_id,
+                    context.user_id,
+                    callback.version,
+                    key,
+                    "Отменено пользователем в Telegram",
+                )
+                text = "Заявка отменена. Можно начать новую через меню."
+                if callback.action == "cancel_new_yes":
+                    self._awaiting_new_request_description.add(context.user_id)
+                    text += "\n\n" + NEW_REQUEST_PROMPT
+                return TelegramIntakeOutcome(
+                    text,
+                    key,
+                    IntakeFieldUpdate(),
+                    reply_markup=(
+                        None
+                        if callback.action == "cancel_new_yes"
+                        else new_request_action(
+                            cancelled.request_id, cancelled.version
+                        )
+                    ),
+                )
+            if callback.action == "new":
+                self._lifecycle.get_confirmation_view(
+                    callback.request_id, context.user_id
+                )
+                active = self._active_or_none(context.user_id)
+                if active is not None:
+                    return TelegramIntakeOutcome(
+                        "У вас уже есть незавершённая заявка.",
+                        key,
+                        IntakeFieldUpdate(),
+                        active,
+                        active_draft_actions(
+                            active.request_id, active.request_version
+                        ),
+                    )
+                if context.user_id in self._awaiting_new_request_description:
+                    return TelegramIntakeOutcome(
+                        "Можно отправлять описание новой заявки.",
+                        key,
+                        IntakeFieldUpdate(),
+                    )
+                self._awaiting_new_request_description.add(context.user_id)
+                return TelegramIntakeOutcome(
+                    NEW_REQUEST_PROMPT, key, IntakeFieldUpdate()
+                )
+            raise ValueError("Unsupported callback action")
+        except RequestAlreadyRegisteredError:
+            return TelegramIntakeOutcome(
+                "Эта заявка уже зарегистрирована.", key, IntakeFieldUpdate()
+            )
+        except RequestAlreadyCancelledError:
+            return TelegramIntakeOutcome(
+                "Эта заявка уже отменена.", key, IntakeFieldUpdate()
+            )
+        except LifecycleConcurrentUpdateError:
+            return self._stale_outcome(context.user_id, callback.request_id, key)
+        except (LifecycleOwnershipError, LifecycleRequestNotFoundError):
+            return TelegramIntakeOutcome(
+                "Не удалось выполнить действие для этой заявки.",
+                key,
+                IntakeFieldUpdate(),
+            )
+        except (RequestNotReadyError, LifecycleTransitionError):
+            return self._stale_outcome(context.user_id, callback.request_id, key)
+        except LifecyclePersistenceError:
+            return self._technical_error(key)
+
+    def _handle_conflict_callback(
+        self,
+        user: ResolvedTelegramUser,
+        callback,
+        key: str,
+    ) -> TelegramIntakeOutcome:
+        active = self._active_or_none(user.user_id)
+        if (
+            active is None
+            or active.request_id != callback.request_id
+            or active.request_version != callback.version
+            or not active.intake_result.draft.conflicts
+        ):
+            return self._stale_outcome(user.user_id, callback.request_id, key)
+        conflict = active.intake_result.draft.conflicts[0]
+        resolution = (
+            "accept" if callback.action == "conflict_accept" else "keep"
+        )
+        update = IntakeFieldUpdate(
+            source=UpdateSource.USER,
+            resolve_conflict_id=conflict.id,
+            conflict_resolution=resolution,
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=callback.request_id,
+            incoming_message=self._envelope(0, "telegram_conflict_callback"),
+            idempotency_key=f"{key}:intake",
+        )
+        prefix = (
+            "Новое значение применено."
+            if resolution == "accept"
+            else "Прежнее значение сохранено."
+        )
+        return TelegramIntakeOutcome(
+            prefix
+            + "\n\n"
+            + format_intake_result(result, self._category_candidates(result)),
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+
+    def _handle_budget_callback(
+        self,
+        user: ResolvedTelegramUser,
+        callback,
+        key: str,
+    ) -> TelegramIntakeOutcome:
+        active = self._active_or_none(user.user_id)
+        if (
+            active is None
+            or active.request_id != callback.request_id
+            or active.request_version != callback.version
+        ):
+            return self._stale_outcome(user.user_id, callback.request_id, key)
+        value = {
+            "budget_yes": "budgeted",
+            "budget_no": "unbudgeted",
+            "budget_unknown": "unknown",
+        }[callback.action]
+        update = IntakeFieldUpdate(
+            values={"budget_status": value},
+            source=UpdateSource.USER,
+            explicit_correction=True,
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=callback.request_id,
+            incoming_message=self._envelope(0, "telegram_callback"),
+            idempotency_key=f"{key}:intake",
+        )
+        prefix = (
+            "Хорошо, отмечу, что бюджет нужно уточнить.\n\n"
+            if value == "unknown"
+            else "Бюджетный статус обновлён.\n\n"
+        )
+        return TelegramIntakeOutcome(
+            prefix + format_intake_result(result, self._category_candidates(result)),
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+
+    def _current_outcome(
+        self,
+        active: PersistentIntakeStepResult,
+        key: str,
+        *,
+        prefix: str = "",
+    ) -> TelegramIntakeOutcome:
+        text = format_current_summary(active)
+        if prefix:
+            text = prefix + "\n\n" + text
+        return TelegramIntakeOutcome(
+            text,
+            key,
+            IntakeFieldUpdate(),
+            active,
+            card_actions(active),
+        )
+
+    def _stale_outcome(
+        self,
+        user_id: UUID,
+        request_id: UUID,
+        key: str,
+    ) -> TelegramIntakeOutcome:
+        active = self._active_or_none(user_id)
+        if active is not None and active.request_id == request_id:
+            return self._current_outcome(
+                active,
+                key,
+                prefix="Заявка уже изменилась. Показываю актуальную версию.",
+            )
+        try:
+            assert self._lifecycle is not None
+            view = self._lifecycle.get_confirmation_view(request_id, user_id)
+        except Exception:
+            return TelegramIntakeOutcome(
+                "Заявка уже изменилась. Откройте текущую заявку через меню.",
+                key,
+                IntakeFieldUpdate(),
+            )
+        if view.request_status == RequestStatus.NEW:
+            text = "Эта заявка уже зарегистрирована."
+        elif view.request_status == RequestStatus.CANCELLED:
+            text = "Эта заявка уже отменена."
+        else:
+            text = "Заявка уже изменилась. Откройте актуальную версию через меню."
+        return TelegramIntakeOutcome(text, key, IntakeFieldUpdate())
+
+    @staticmethod
+    def _technical_error(key: str) -> TelegramIntakeOutcome:
+        return TelegramIntakeOutcome(
+            "Не удалось выполнить действие. Попробуйте ещё раз немного позже.",
+            key,
+            IntakeFieldUpdate(),
+        )
+
+    @staticmethod
+    def idempotency_key(chat_id: int, message_id: int) -> str:
+        return f"telegram:{chat_id}:{message_id}"
+
+    @staticmethod
+    def _envelope(message_id: int, source: str) -> MessageEnvelope:
+        return MessageEnvelope(
+            message_id=str(message_id),
+            metadata={"transport": "telegram", "source": source},
+        )
+
+    @staticmethod
+    def _profile_update(
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        awaiting_field_code: str | None,
+    ) -> IntakeFieldUpdate:
+        draft = active.intake_result.draft if active is not None else None
+        values: dict[str, str] = {}
+        if (
+            user.full_name
+            and awaiting_field_code != "contact_person"
+            and (draft is None or draft.contact_person is None)
+        ):
+            values["contact_person"] = user.full_name
+        if (
+            user.department
+            and awaiting_field_code != "department"
+            and (draft is None or draft.department is None)
+        ):
+            values["department"] = user.department
+        return IntakeFieldUpdate(values=values, source=UpdateSource.SYSTEM)
+
+    def _category_candidates(
+        self,
+        active: PersistentIntakeStepResult | None,
+    ) -> tuple[str, ...]:
+        if active is None:
+            return ()
+        question = active.intake_result.next_question
+        if question is None or question.field_code != "category_code":
+            return ()
+        classification = self._categories.classify_draft(active.intake_result.draft)
+        if classification.kind == "exact" and classification.category_code:
+            return (classification.category_code,)
+        return classification.candidates[:4]
+
+    def _active_or_none(self, user_id: UUID) -> PersistentIntakeStepResult | None:
+        try:
+            return self._orchestrator.get_active_session(user_id)
+        except ActiveDraftNotFoundError:
+            return None
+
+    def _should_use_structured_extraction(
+        self,
+        *,
+        original_missing: bool,
+        active: PersistentIntakeStepResult | None,
+        question,
+        text: str,
+    ) -> bool:
+        if self._extraction_mode == "rule" or self._structured_extractor is None:
+            return False
+        if original_missing:
+            return True
+        if (
+            active is not None
+            and active.dialog_state.intake_status == IntakeStatus.EDITING
+        ):
+            return True
+        if question is None:
+            return False
+        if question.question_type == "free_text":
+            return True
+        return len(text.split()) >= 5
+
+    def _remember_extraction(self, key: str, update: IntakeFieldUpdate) -> None:
+        if len(self._extraction_cache) >= 1024:
+            self._extraction_cache.pop(next(iter(self._extraction_cache)))
+        self._extraction_cache[key] = update.model_copy(deep=True)
+
+    def _remember_message_outcome(
+        self,
+        key: str,
+        outcome: TelegramIntakeOutcome,
+    ) -> None:
+        if len(self._message_outcome_cache) >= 1024:
+            self._message_outcome_cache.pop(next(iter(self._message_outcome_cache)))
+        self._message_outcome_cache[key] = outcome
+
+
+def _safe_scalar_values(update: IntakeFieldUpdate) -> dict[str, object]:
+    return {
+        field_name: value
+        for field_name, value in update.values.items()
+        if field_name in _DEBUG_SCALAR_FIELDS
+    }
+
+
+def _user_context(user: ResolvedTelegramUser | UUID) -> ResolvedTelegramUser:
+    if isinstance(user, UUID):
+        return ResolvedTelegramUser(user_id=user, full_name="")
+    return user
+
+
+def _conflict_resolution(text: str) -> str | None:
+    normalized = " ".join(
+        text.casefold().replace("ё", "е").strip(" .,!?:;«»\"").split()
+    )
+    if normalized in _ACCEPT_CONFLICT_REPLIES:
+        return "accept"
+    if normalized in _KEEP_CONFLICT_REPLIES:
+        return "keep"
+    return None

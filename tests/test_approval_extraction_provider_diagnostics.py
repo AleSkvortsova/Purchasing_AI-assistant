@@ -19,7 +19,11 @@ from pydantic import ValidationError
 from app.extraction.exceptions import ApprovalExtractionProviderError
 from app.extraction.models import RawApprovalExtraction
 from app.extraction.openai_schema import OpenAIApprovalExtractionPayload
-from app.extraction.provider import OpenAIApprovalExtractionProvider
+from app.extraction.provider import (
+    OpenAIApprovalExtractionProvider,
+    _evidence_validation_issues,
+    _without_unsupported_fields,
+)
 from scripts import extract_approval_context
 
 
@@ -331,6 +335,19 @@ def test_invalid_evidence_reports_only_rejected_fields() -> None:
         category_raw=None,
         has_data_access_raw=None,
         work_on_site_raw=None,
+        procurement_type_raw=None,
+        item_name_raw=None,
+        quantity_raw=None,
+        unit_raw=None,
+        specifications_raw=None,
+        desired_result_raw=None,
+        amount_modifier_raw=None,
+        billing_period_raw=None,
+        desired_delivery_date_raw=None,
+        delivery_location_raw=None,
+        business_justification_raw=None,
+        department_raw=None,
+        contact_person_raw=None,
         urgency_claimed=False,
         confidence_items=[],
         evidence_items=[
@@ -343,20 +360,70 @@ def test_invalid_evidence_reports_only_rejected_fields() -> None:
         contradictions=[],
     )
 
+    client = Mock()
+    client.responses.parse.return_value = _response(parsed=parsed)
+    provider = OpenAIApprovalExtractionProvider(
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        max_retries=2,
+        client=client,
+    )
     with pytest.raises(
         ApprovalExtractionProviderError,
         match="evidence validation",
     ) as captured:
-        _provider(response=_response(parsed=parsed)).extract(
-            "Юридические услуги на 600 тысяч"
-        )
+        provider.extract("Юридические услуги на 600 тысяч")
 
     diagnostic = captured.value
     assert diagnostic.error_type == "ApprovalEvidenceValidationError"
     assert diagnostic.validation_errors == [
         "amount: evidence not present in input"
     ]
+    assert diagnostic.diagnostic_code == "evidence_validation_failed"
+    assert diagnostic.validation_error_codes == {
+        "amount": "unsupported_evidence"
+    }
+    assert client.responses.parse.call_count == 1
     assert "secret invented evidence" not in diagnostic.safe_message
+
+
+def test_semantic_and_inferred_unit_evidence_are_rejected_per_field() -> None:
+    raw = RawApprovalExtraction(
+        procurement_type_raw="goods",
+        category_raw="G06",
+        item_name_raw="паллеты для склада",
+        unit_raw="шт.",
+        desired_result_raw="разместить товары",
+        confidence_by_field={
+            "procurement_type": 0.99,
+            "category": 0.90,
+            "item_name": 0.95,
+            "unit": 0.90,
+            "desired_result": 0.80,
+        },
+        evidence_by_field={
+            "procurement_type": "Купить",
+            "category": "паллеты для склада",
+            "item_name": "паллеты для склада",
+            "unit": "шт.",
+        },
+    )
+
+    issues = _evidence_validation_issues(
+        "Купить 12 паллет для склада",
+        raw,
+    )
+    cleaned = _without_unsupported_fields(raw, set(issues))
+
+    assert "category" not in issues
+    assert "item_name" not in issues
+    assert issues == {
+        "desired_result": "missing_evidence",
+        "unit": "unsupported_evidence",
+    }
+    assert cleaned.desired_result_raw is None
+    assert cleaned.unit_raw is None
+    assert cleaned.category_raw == "G06"
 
 
 def test_other_openai_api_error_is_distinct() -> None:

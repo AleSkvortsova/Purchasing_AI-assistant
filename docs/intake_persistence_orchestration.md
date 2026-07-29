@@ -91,8 +91,12 @@ Mapping типов централизован:
 
 - `goods ↔ product`;
 - `service ↔ service`;
-- `work → service`, при этом исходное `work` сохраняется в intake draft и
-  восстанавливается из JSON.
+- старое JSON-значение `work` при чтении нормализуется в `service`; новый
+  canonical draft и его проекции сохраняют только `goods` или `service`.
+
+Фактическое наличие старых значений проверяется read-only запросом
+`scripts/sql/check_legacy_work_records.sql`. Историческая migration 009
+остаётся неизменной и продолжает безопасно понимать старый `work`.
 
 ## Dialog state
 
