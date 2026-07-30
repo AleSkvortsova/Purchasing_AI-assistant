@@ -20,3 +20,15 @@ class IndexingError(RagError):
 
 class RetrievalError(RagError):
     """Raised when a retrieval request is invalid or cannot be completed."""
+
+
+class AnswerGenerationError(RagError):
+    """Raised when a grounded answer cannot be generated safely."""
+
+
+class AnswerProviderUnavailableError(AnswerGenerationError):
+    """Raised when the external answer provider cannot be reached."""
+
+
+class MalformedAnswerResponseError(AnswerGenerationError):
+    """Raised when the provider response does not satisfy the DTO contract."""

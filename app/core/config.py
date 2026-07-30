@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     rag_rrf_k: int = Field(default=60, ge=1, le=1000)
     rag_semantic_weight: float = Field(default=1.0, gt=0, le=10)
     rag_lexical_weight: float = Field(default=1.0, gt=0, le=10)
+    rag_answer_model: str = "gpt-5.6-luna"
+    rag_answer_timeout_seconds: float = Field(default=30, gt=0)
     enable_rag_index_endpoint: bool = False
     approval_extraction_provider: Literal[
         "openai",

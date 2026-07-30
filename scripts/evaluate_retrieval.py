@@ -130,7 +130,7 @@ def evaluate_mode(
     return calculate_metrics(cases, ranked_results, latencies), failures
 
 
-def build_offline_service() -> KnowledgeRetrievalService:
+def build_offline_service(top_k: int = 5) -> KnowledgeRetrievalService:
     documents, chunks = load_processed_knowledge_data(DOCUMENTS, CHUNKS)
     repository = InMemoryKnowledgeRepository()
     provider = FakeEmbeddingProvider(dimensions=32, model="fake-evaluation")
@@ -150,6 +150,7 @@ def build_offline_service() -> KnowledgeRetrievalService:
     return KnowledgeRetrievalService(
         repository,
         provider,
+        default_top_k=top_k,
         default_mode="hybrid",
         default_threshold=-1.0,
     )

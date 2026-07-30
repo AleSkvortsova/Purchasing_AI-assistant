@@ -14,9 +14,10 @@ Backend MVP этапа intake и request lifecycle завершён и пров�
 
 Также работают OpenAI extraction layer, embeddings, хранение чанков в
 Supabase/pgvector, идемпотентная индексация и hybrid retrieval через CLI и API.
-Это завершение backend milestone, а не всего продукта: Telegram adapter
-поддерживает intake, карточку и lifecycle-действия; production E2E через Telegram,
-интерфейс закупщика и фактическое исполнение согласований ещё не реализованы.
+Telegram adapter поддерживает intake, карточку, lifecycle-действия, read-only
+раздел «Мои заявки» и изолированный режим вопросов по регламенту с grounded
+ответом и источниками. Интерфейс закупщика и фактическое исполнение
+согласований ещё не реализованы.
 
 ## Границы MVP
 
@@ -96,6 +97,8 @@ RAG_LEXICAL_CANDIDATE_COUNT=20
 RAG_RRF_K=60
 RAG_SEMANTIC_WEIGHT=1.0
 RAG_LEXICAL_WEIGHT=1.0
+RAG_ANSWER_MODEL=gpt-5.6-luna
+RAG_ANSWER_TIMEOUT_SECONDS=30
 ENABLE_RAG_INDEX_ENDPOINT=false
 ```
 
@@ -127,6 +130,15 @@ python -m app.bot
 только «Товар» и «Услуга», а validators и intake core остаются источником
 истины. Подробнее:
 [`docs/telegram_adapter.md`](docs/telegram_adapter.md).
+
+Главное меню также содержит «Мои заявки», объединённую «Инструкцию» и
+«Спросить по регламенту». RAG вызывается только после явного входа в последний
+режим и не изменяет активный черновик. Ответ строится только по чанкам
+существующего hybrid retrieval и содержит уникальные понятные источники.
+Examples/templates отделены от нормативных источников: значения из частных
+примеров не переносятся в данные вопроса, а каждый claim проходит отдельную
+проверку источника и конкретных значений.
+Подробнее: [`docs/regulation_qa.md`](docs/regulation_qa.md).
 
 ## Проверка health
 
@@ -357,6 +369,7 @@ deterministic fallback,
 карточка заявки и lifecycle-кнопки confirm/edit/cancel поверх существующих
 backend services. Полный production E2E, интерфейс
 закупщика, фактическое исполнение согласований, production deployment,
-генерация RAG-ответа и reranker пока не реализованы.
+reranker пока не реализован. Grounded RAG-ответ реализован только в отдельном
+Telegram-режиме и требует ручного production smoke test перед фиксацией этапа.
 Перед реальным пилотом необходимо включить RLS и определить политики
 минимальных прав.

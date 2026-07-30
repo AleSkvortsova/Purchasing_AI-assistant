@@ -17,7 +17,10 @@ from app.bot.keyboards import (
     MENU_CURRENT,
     MENU_EXAMPLES,
     MENU_HELP,
+    MENU_INSTRUCTION,
+    MENU_MY_REQUESTS,
     MENU_NEW,
+    MENU_REGULATIONS,
     encode_callback,
     main_menu,
     parse_callback,
@@ -55,8 +58,11 @@ def _stack():
     lifecycle = RequestLifecycleService(
         InMemoryRequestLifecycleRepository(storage), core
     )
-    return storage, intake, lifecycle, TelegramIntakeAdapter(
-        intake, lifecycle_service=lifecycle
+    return (
+        storage,
+        intake,
+        lifecycle,
+        TelegramIntakeAdapter(intake, lifecycle_service=lifecycle),
     )
 
 
@@ -136,8 +142,9 @@ def test_main_menu_and_start_do_not_create_draft() -> None:
     assert [button.text for row in keyboard.keyboard for button in row] == [
         MENU_NEW,
         MENU_CURRENT,
-        MENU_EXAMPLES,
-        MENU_HELP,
+        MENU_MY_REQUESTS,
+        MENU_INSTRUCTION,
+        MENU_REGULATIONS,
     ]
     try:
         intake.get_active_session(USER_ID)
@@ -283,8 +290,7 @@ def test_service_card_separates_result_and_deduplicates_requirements() -> None:
         {
             "item_name": "Установка кондиционеров",
             "description": (
-                "Кондиционеры обеспечивают охлаждение воздуха, "
-                "работы проводить утром"
+                "Кондиционеры обеспечивают охлаждение воздуха, работы проводить утром"
             ),
             "specifications": (
                 "Два кондиционера в переговорных комнатах; "
@@ -301,10 +307,7 @@ def test_service_card_separates_result_and_deduplicates_requirements() -> None:
     assert "Объём и требования:" in text
     assert "Два кондиционера в переговорных комнатах" in text
     assert text.casefold().count("работы проводить") == 1
-    assert (
-        "Ожидаемый результат: Кондиционеры обеспечивают охлаждение воздуха"
-        in text
-    )
+    assert "Ожидаемый результат: Кондиционеры обеспечивают охлаждение воздуха" in text
     assert "Срок оказания услуги:" in text
 
 
@@ -390,9 +393,7 @@ def test_return_to_edit_uses_lifecycle_and_allows_explicit_update() -> None:
     active = intake.get_active_session(USER_ID)
     assert active.dialog_state.intake_status == IntakeStatus.EDITING
 
-    changed = adapter.handle_text(
-        USER_ID, 1001, 77, "Нужно купить 5 ноутбуков"
-    )
+    changed = adapter.handle_text(USER_ID, 1001, 77, "Нужно купить 5 ноутбуков")
     assert changed.update.explicit_correction is True
     assert changed.result.intake_result.draft.item_name == "ноутбуки"
     assert changed.result.intake_result.draft.quantity == 5
@@ -471,9 +472,7 @@ def test_new_request_after_registration_is_independent() -> None:
     assert confirmed.text.endswith(NEW_REQUEST_PROMPT)
 
     profile = ResolvedTelegramUser(USER_ID, "Александра", "АХО")
-    created_b = adapter.handle_text(
-        profile, 1001, 88, "Нужно купить 5 ноутбуков"
-    )
+    created_b = adapter.handle_text(profile, 1001, 88, "Нужно купить 5 ноутбуков")
     assert created_b.result.request_id != ready_a.request_id
     draft_b = created_b.result.intake_result.draft
     assert draft_b.item_name == "ноутбуки"

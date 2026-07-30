@@ -6,14 +6,18 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.bot.keyboards import conflict_actions, ready_actions, unresolved_actions
 from app.bot.normalization import parse_amount_evidence
+from app.bot.request_history import RequestHistoryItem, RequestHistoryView
 from app.intake.field_registry import CATEGORY_NAMES
 from app.intake.models import (
     IntakeStatus,
     NextQuestion,
     ProcurementType,
+    RequestCard,
     RequestDraftData,
 )
 from app.intake_persistence.models import PersistentIntakeStepResult
+from app.rag.answering import RegulationAnswer
+from app.schemas.common import RequestStatus
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 _SAFE_MESSAGE_LIMIT = TELEGRAM_MESSAGE_LIMIT - 96
@@ -32,30 +36,44 @@ NEW_REQUEST_PROMPT = (
     "что нужно, количество или объём, основные требования, срок и "
     "ориентировочную сумму."
 )
-EXAMPLES_TEXT = (
-    "Чем подробнее вы опишете потребность сразу, тем меньше уточнений "
-    "потребуется.\n\n"
-    "Товар\n\n"
-    "Нужно купить 10 эргономичных офисных кресел с регулируемой высотой и "
-    "поддержкой спины. Товар нужен до 20 августа, ориентировочная сумма — не "
-    "более 120 000 ₽. Поставка в офис в Санкт-Петербурге. Закупка нужна для "
-    "оснащения новых рабочих мест.\n\n"
-    "Услуга\n\n"
-    "Нужно организовать еженедельную уборку офиса площадью 500 м² с 1 "
-    "сентября. Уборка нужна по будням после 19:00, ожидаемый результат — "
-    "чистые рабочие зоны, кухня и санузлы. Ориентировочная сумма — до "
-    "80 000 ₽ в месяц. Место оказания услуги — офис в Санкт-Петербурге."
+INSTRUCTION_TEXT = (
+    "Как работать с ботом\n\n"
+    "1. Нажмите «Новая заявка» и опишите потребность свободным текстом.\n"
+    "2. Ответьте на уточняющие вопросы.\n"
+    "3. Откройте «Текущая заявка» и проверьте карточку.\n"
+    "4. При необходимости измените её.\n"
+    "5. Подтвердите регистрацию.\n\n"
+    "Что лучше указать сразу\n"
+    "• что требуется;\n"
+    "• количество или объём;\n"
+    "• основные требования;\n"
+    "• сумму, срок и место;\n"
+    "• бюджетный статус и цель закупки.\n\n"
+    "Если указано «Бюджет требуется уточнить», карточка сохранится, но до "
+    "регистрации нужно выбрать бюджетный статус.\n\n"
+    "Пример товара\n"
+    "«Нужно купить 10 мониторов для отдела продаж до 20 августа, "
+    "ориентировочная сумма 250 000 рублей, закупка предусмотрена бюджетом».\n\n"
+    "Пример услуги\n"
+    "«Нужно провести техническое обслуживание трёх кондиционеров в офисе "
+    "до 25 августа, ориентировочная сумма 40 000 рублей».\n\n"
+    "Вернуться к черновику можно через «Текущая заявка». Вопрос о правилах "
+    "оформления или согласования задайте через «Спросить по регламенту»."
 )
-HELP_TEXT = (
-    "Как работает Бот Закупкин:\n\n"
-    "1. Опишите, что нужно приобрести или заказать.\n"
-    "2. Я уточню недостающие сведения.\n"
-    "3. Вы проверите готовую карточку.\n"
-    "4. После подтверждения заявка будет зарегистрирована.\n\n"
-    "Полезно сразу указать количество или объём, основные требования, срок, "
-    "место и ориентировочную сумму. Заявку можно изменить до регистрации, а "
-    "незавершённую — отменить. Зарегистрированная заявка больше не "
-    "редактируется в Telegram MVP."
+# Compatibility for code importing the former static sections.
+EXAMPLES_TEXT = INSTRUCTION_TEXT
+HELP_TEXT = INSTRUCTION_TEXT
+REGULATION_INTRO_TEXT = (
+    "Вопросы по регламенту\n\n"
+    "Задайте вопрос о правилах оформления, согласования и обработки "
+    "закупочных заявок.\n\n"
+    "Я отвечу на основе регламентирующих документов и укажу источники.\n\n"
+    "Например:\n"
+    "• Кто согласует закупку на 180 000 рублей?\n"
+    "• Какая заявка считается срочной?\n"
+    "• Можно ли объединить товары и услуги?\n"
+    "• Что означает статус «Требует доработки»?\n"
+    "• Какие сведения нужны для заявки на перевозку?"
 )
 READY_TEXT = (
     "Данные собраны. Откройте «Текущая заявка», чтобы проверить карточку "
@@ -136,7 +154,54 @@ def format_request_card(result: PersistentIntakeStepResult) -> str:
     card = intake.request_card
     if card is None:
         return READY_TEXT
-    draft = intake.draft
+    lines = ["Проверьте заявку перед отправкой:", ""]
+    lines.extend(_request_detail_lines(card, intake.draft))
+    return _limit("\n".join(lines))
+
+
+def format_history_list(items: list[RequestHistoryItem]) -> str:
+    if not items:
+        return "У вас пока нет зарегистрированных заявок."
+    lines = ["Ваши последние заявки"]
+    for item in items:
+        type_label = _type_display(item.request_type) or "Заявка"
+        lines.extend(
+            [
+                "",
+                item.request_number or "Без номера",
+                f"{type_label}: {item.item_name}",
+                f"Статус: {_request_status_display(item.status)}",
+                f"Создана: {_date_display(item.displayed_at.date())}",
+            ]
+        )
+    return _limit("\n".join(lines))
+
+
+def format_history_card(view: RequestHistoryView) -> str:
+    number = view.request.request_number or "Без номера"
+    lines = [
+        f"Заявка {number}",
+        "",
+        f"Статус: {_request_status_display(view.request.status)}",
+    ]
+    lines.extend(_request_detail_lines(view.card, view.draft))
+    return _limit("\n".join(lines))
+
+
+def format_regulation_answer(result: RegulationAnswer) -> str:
+    if result.status != "answered":
+        return _limit(result.answer)
+    lines = ["Ответ", "", result.answer]
+    if result.sources:
+        lines.extend(["", "Источники:"])
+        lines.extend(f"• {source.display_name}" for source in result.sources)
+    return _limit("\n".join(lines))
+
+
+def _request_detail_lines(
+    card: RequestCard,
+    draft: RequestDraftData,
+) -> list[str]:
     fields = {
         field.code: field
         for section in card.sections
@@ -145,7 +210,7 @@ def format_request_card(result: PersistentIntakeStepResult) -> str:
     }
     values = {code: field.display_value for code, field in fields.items()}
     is_goods = draft.procurement_type == ProcurementType.GOODS
-    lines = ["Проверьте заявку перед отправкой:", ""]
+    lines: list[str] = []
     lines.append(f"Тип закупки: {'Товар' if is_goods else 'Услуга'}")
     category = _category_display(draft.category_code)
     if category:
@@ -192,7 +257,15 @@ def format_request_card(result: PersistentIntakeStepResult) -> str:
                 "маршрут согласования.",
             ]
         )
-    return _limit("\n".join(lines))
+    return lines
+
+
+def _request_status_display(status: RequestStatus) -> str:
+    return {
+        RequestStatus.DRAFT: "Черновик",
+        RequestStatus.NEW: "Передана в отдел закупок",
+        RequestStatus.CANCELLED: "Отменена",
+    }[status]
 
 
 def format_current_summary(result: PersistentIntakeStepResult) -> str:
@@ -259,12 +332,10 @@ def _contextual_question(question: NextQuestion, procurement_type: str | None) -
     if procurement_type == "service":
         return {
             "description": (
-                "Опишите, какой результат нужен и какие требования важны "
-                "для услуги."
+                "Опишите, какой результат нужен и какие требования важны для услуги."
             ),
             "specifications": (
-                "Опишите, какой результат нужен и какие требования важны "
-                "для услуги."
+                "Опишите, какой результат нужен и какие требования важны для услуги."
             ),
             "delivery_location": "Где должна быть оказана услуга?",
             "desired_delivery_date": (
@@ -334,9 +405,7 @@ def _amount_display(field) -> str | None:
         return None
     value = field.display_value
     modifier = field.metadata.get("amount_modifier", "exact")
-    prefix = {"maximum": "не более ", "approximate": "около "}.get(
-        modifier, ""
-    )
+    prefix = {"maximum": "не более ", "approximate": "около "}.get(modifier, "")
     suffix = {
         "per_month": " в месяц",
         "per_quarter": " в квартал",
@@ -351,9 +420,7 @@ def _draft_amount_display(draft: RequestDraftData) -> str | None:
     state = draft.field_states.get("amount")
     metadata = parse_amount_evidence(state.evidence if state else None)
     modifier = metadata.get("amount_modifier", "exact")
-    prefix = {"maximum": "не более ", "approximate": "около "}.get(
-        modifier, ""
-    )
+    prefix = {"maximum": "не более ", "approximate": "около "}.get(modifier, "")
     suffix = {
         "per_month": " в месяц",
         "per_quarter": " в квартал",
@@ -364,11 +431,15 @@ def _draft_amount_display(draft: RequestDraftData) -> str | None:
 
 
 def _budget_display(value: str | None) -> str | None:
-    return {
-        "budgeted": "Предусмотрена",
-        "unbudgeted": "Не предусмотрена",
-        "unknown": "Требуется уточнение",
-    }.get(value) if value else None
+    return (
+        {
+            "budgeted": "Предусмотрена",
+            "unbudgeted": "Не предусмотрена",
+            "unknown": "Требуется уточнение",
+        }.get(value)
+        if value
+        else None
+    )
 
 
 def _date_display(value: date | None) -> str | None:
@@ -409,11 +480,7 @@ def _distinct_service_requirements(
     **values: str | None,
 ) -> str | None:
     references = [value for value in (item_name, desired_result) if value]
-    candidates = [
-        (code, value)
-        for code, value in values.items()
-        if value
-    ]
+    candidates = [(code, value) for code, value in values.items() if value]
     candidates.sort(
         key=lambda item: (
             not _is_user_confirmed(draft, item[0]),
@@ -455,9 +522,7 @@ def _is_user_confirmed(draft: RequestDraftData, field_code: str) -> bool:
 
 def _requirement_segments(value: str) -> list[str]:
     return [
-        segment.strip()
-        for segment in re.split(r"[.;]+|,\s+", value)
-        if segment.strip()
+        segment.strip() for segment in re.split(r"[.;]+|,\s+", value) if segment.strip()
     ]
 
 

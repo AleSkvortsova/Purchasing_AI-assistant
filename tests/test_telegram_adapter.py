@@ -21,7 +21,7 @@ from app.bot.handlers import (
     handle_start,
     handle_text_message,
 )
-from app.bot.keyboards import MENU_EXAMPLES, encode_callback
+from app.bot.keyboards import LEGACY_MENU_EXAMPLES, encode_callback
 from app.bot.parser import DeterministicIntakeParser
 from app.bot.users import (
     ResolvedTelegramUser,
@@ -250,11 +250,11 @@ def test_start_with_ready_draft_does_not_confirm() -> None:
 
 def test_menu_message_is_routed_before_intake_parser() -> None:
     orchestrator = FakeOrchestrator()
-    message = FakeMessage(MENU_EXAMPLES)
+    message = FakeMessage(LEGACY_MENU_EXAMPLES)
 
     asyncio.run(handle_text_message(message, dependencies(orchestrator)))
 
-    assert "Товар" in message.answers[0]
+    assert "Пример товара" in message.answers[0]
     assert orchestrator.process_calls == []
 
 

@@ -1,4 +1,1 @@
-"""Local knowledge-base preparation utilities.
-
-Retrieval, embeddings, and RAG responses are intentionally not implemented yet.
-"""
+"""Knowledge-base indexing, retrieval, and grounded answer services."""

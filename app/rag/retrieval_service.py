@@ -32,6 +32,14 @@ class KnowledgeRetrievalService:
         self._default_semantic_weight = default_semantic_weight
         self._default_lexical_weight = default_lexical_weight
 
+    @property
+    def default_top_k(self) -> int:
+        return self._default_top_k
+
+    @property
+    def default_rrf_k(self) -> int:
+        return self._default_rrf_k
+
     def search(
         self,
         query: str,

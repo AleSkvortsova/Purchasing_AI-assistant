@@ -5,29 +5,47 @@ from typing import Protocol
 from uuid import UUID
 
 from app.bot.categories import DeterministicCategoryClassifier
+from app.bot.dialog_modes import (
+    DialogModeRepository,
+    DialogReplayConflictError,
+    InMemoryDialogModeRepository,
+)
 from app.bot.formatters import (
     ACTIVE_DRAFT_NOTICE,
-    EXAMPLES_TEXT,
-    HELP_TEXT,
+    INSTRUCTION_TEXT,
     NEW_REQUEST_PROMPT,
+    REGULATION_INTRO_TEXT,
     WELCOME_TEXT,
     card_actions,
     format_current_summary,
+    format_history_card,
+    format_history_list,
     format_intake_result,
     format_question,
+    format_regulation_answer,
 )
 from app.bot.keyboards import (
+    LEGACY_MENU_EXAMPLES,
+    LEGACY_MENU_HELP,
     MENU_CURRENT,
-    MENU_EXAMPLES,
-    MENU_HELP,
+    MENU_INSTRUCTION,
+    MENU_MY_REQUESTS,
     MENU_NEW,
+    MENU_REGULATIONS,
     active_draft_actions,
     budget_choices,
     cancel_confirmation,
+    empty_history_actions,
+    history_actions,
+    history_card_actions,
+    instruction_actions,
     new_request_action,
     parse_callback,
+    parse_navigation_callback,
+    regulation_actions,
 )
 from app.bot.parser import DeterministicIntakeParser, TelegramParseError
+from app.bot.request_history import RequestHistoryError, RequestHistoryService
 from app.bot.users import ResolvedTelegramUser
 from app.extraction.intake import (
     TelegramExtractionMode,
@@ -42,6 +60,7 @@ from app.intake_persistence.models import (
     MessageEnvelope,
     PersistentIntakeStepResult,
 )
+from app.rag.answering import RegulationQuestionAnsweringService
 from app.request_lifecycle.exceptions import (
     LifecycleConcurrentUpdateError,
     LifecycleOwnershipError,
@@ -136,6 +155,9 @@ class TelegramIntakeAdapter:
         structured_extractor: TelegramIntakeExtractionService | None = None,
         extraction_mode: TelegramExtractionMode = "rule",
         extraction_debug: bool = False,
+        dialog_modes: DialogModeRepository | None = None,
+        request_history: RequestHistoryService | None = None,
+        regulation_qa: RegulationQuestionAnsweringService | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._categories = category_classifier or DeterministicCategoryClassifier()
@@ -146,6 +168,9 @@ class TelegramIntakeAdapter:
         self._structured_extractor = structured_extractor
         self._extraction_mode = extraction_mode
         self._extraction_debug = extraction_debug
+        self._dialog_modes = dialog_modes or InMemoryDialogModeRepository()
+        self._request_history = request_history
+        self._regulation_qa = regulation_qa
         self._extraction_cache: dict[str, IntakeFieldUpdate] = {}
         self._message_outcome_cache: dict[str, TelegramIntakeOutcome] = {}
         self._awaiting_new_request_description: set[UUID] = set()
@@ -163,21 +188,37 @@ class TelegramIntakeAdapter:
     ) -> TelegramIntakeOutcome:
         context = _user_context(user)
         active = self._active_or_none(context.user_id)
-        if action == MENU_EXAMPLES:
+        if action in {MENU_INSTRUCTION, LEGACY_MENU_EXAMPLES, LEGACY_MENU_HELP}:
+            self._dialog_modes.set_mode(context.user_id, "idle")
             return TelegramIntakeOutcome(
-                EXAMPLES_TEXT, "menu:examples", IntakeFieldUpdate()
+                INSTRUCTION_TEXT,
+                "menu:instruction",
+                IntakeFieldUpdate(),
+                reply_markup=instruction_actions(),
             )
-        if action == MENU_HELP:
-            return TelegramIntakeOutcome(HELP_TEXT, "menu:help", IntakeFieldUpdate())
+        if action == MENU_REGULATIONS:
+            self._dialog_modes.set_mode(context.user_id, "regulation_qa")
+            return TelegramIntakeOutcome(
+                REGULATION_INTRO_TEXT,
+                "menu:regulations",
+                IntakeFieldUpdate(),
+                reply_markup=regulation_actions(),
+            )
+        if action == MENU_MY_REQUESTS:
+            self._dialog_modes.set_mode(context.user_id, "idle")
+            return self._history_outcome(context.user_id, "menu:history")
         if action == MENU_CURRENT:
             if active is None:
+                self._dialog_modes.set_mode(context.user_id, "idle")
                 return TelegramIntakeOutcome(
                     "Сейчас у вас нет незавершённой заявки.",
                     "menu:current",
                     IntakeFieldUpdate(),
                 )
+            self._dialog_modes.set_mode(context.user_id, "intake")
             return self._current_outcome(active, "menu:current")
         if action == MENU_NEW:
+            self._dialog_modes.set_mode(context.user_id, "intake")
             if active is None:
                 if context.user_id in self._awaiting_new_request_description:
                     return TelegramIntakeOutcome(
@@ -219,6 +260,8 @@ class TelegramIntakeAdapter:
                 outgoing_response_count=0,
             )
             return replace(replayed, replayed=True)
+        if self._dialog_modes.get_mode(user_id) == "regulation_qa":
+            return self._handle_regulation_question(user_id, key, text)
         active = self._active_or_none(user_id)
         if (
             active is not None
@@ -317,9 +360,7 @@ class TelegramIntakeAdapter:
                         ]
                         if question.field_code in parsed_update.evidence_by_field:
                             evidence[question.field_code] = (
-                                parsed_update.evidence_by_field[
-                                    question.field_code
-                                ]
+                                parsed_update.evidence_by_field[question.field_code]
                             )
                     cached = cached.model_copy(
                         update={
@@ -366,16 +407,13 @@ class TelegramIntakeAdapter:
                         "Telegram structured extraction fallback mode=%s "
                         "error_type=%s diagnostic_code=%s",
                         self._extraction_mode,
-                        resolution.failure.error_type
-                        or resolution.failure.error,
+                        resolution.failure.error_type or resolution.failure.error,
                         resolution.failure.diagnostic_code,
                     )
                     self._debug_event(
                         key,
                         "structured_fallback",
-                        rejection_codes=(
-                            resolution.failure.validation_error_codes
-                        ),
+                        rejection_codes=(resolution.failure.validation_error_codes),
                     )
             update = cached
         if (
@@ -405,8 +443,7 @@ class TelegramIntakeAdapter:
         except ConcurrentIntakeUpdateError:
             refreshed = self._active_or_none(user_id)
             text_result = (
-                "Состояние заявки обновилось. "
-                "Повторите ответ на актуальный вопрос."
+                "Состояние заявки обновилось. Повторите ответ на актуальный вопрос."
             )
             if refreshed is not None and refreshed.intake_result.next_question:
                 text_result += "\n\n" + format_question(
@@ -418,9 +455,7 @@ class TelegramIntakeAdapter:
         response = format_intake_result(result, self._category_candidates(result))
         self._awaiting_new_request_description.discard(user_id)
         if update.values.get("budget_status") == "unknown":
-            response = (
-                "Хорошо, отмечу, что бюджет нужно уточнить.\n\n" + response
-            )
+            response = "Хорошо, отмечу, что бюджет нужно уточнить.\n\n" + response
         outcome = TelegramIntakeOutcome(
             response,
             key,
@@ -432,9 +467,7 @@ class TelegramIntakeAdapter:
             key,
             "persisted_result",
             merged_fields=sorted(update.values),
-            completed_fields=sorted(
-                result.intake_result.completeness.completed_fields
-            ),
+            completed_fields=sorted(result.intake_result.completeness.completed_fields),
             missing_fields=list(result.intake_result.completeness.missing_fields),
             next_question=(
                 result.intake_result.next_question.field_code
@@ -508,6 +541,55 @@ class TelegramIntakeAdapter:
         self._remember_message_outcome(key, outcome)
         return outcome
 
+    def handle_navigation_callback(
+        self,
+        user: ResolvedTelegramUser | UUID,
+        callback_query_id: str,
+        data: str | None,
+    ) -> TelegramIntakeOutcome:
+        context = _user_context(user)
+        callback = parse_navigation_callback(data)
+        key = f"telegram-navigation:{callback_query_id}:{callback.action}"
+        if callback.request_id is not None:
+            key += f":{callback.request_id.hex}"
+        replayed = self._message_outcome_cache.get(key)
+        if replayed is not None:
+            return replace(replayed, replayed=True)
+        if callback.action in {"instruction", "help", "examples"}:
+            outcome = self.handle_menu(context, MENU_INSTRUCTION)
+        elif callback.action == "regulations":
+            outcome = self.handle_menu(context, MENU_REGULATIONS)
+        elif callback.action in {"regulations_end", "menu"}:
+            self._dialog_modes.set_mode(context.user_id, "idle")
+            outcome = TelegramIntakeOutcome(
+                "Выберите действие в главном меню.",
+                key,
+                IntakeFieldUpdate(),
+            )
+        elif callback.action == "new":
+            outcome = self.handle_menu(context, MENU_NEW)
+        elif callback.action == "current":
+            outcome = self.handle_menu(context, MENU_CURRENT)
+        elif callback.action == "history":
+            self._dialog_modes.set_mode(context.user_id, "idle")
+            outcome = self._history_outcome(context.user_id, key)
+        elif callback.action == "request" and callback.request_id is not None:
+            self._dialog_modes.set_mode(context.user_id, "idle")
+            outcome = self._history_card_outcome(
+                context.user_id,
+                callback.request_id,
+                key,
+            )
+        else:
+            outcome = TelegramIntakeOutcome(
+                "Меню обновлено. Выберите действие в главном меню.",
+                key,
+                IntakeFieldUpdate(),
+            )
+        outcome = replace(outcome, idempotency_key=key)
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
     def handle_callback(
         self,
         user: ResolvedTelegramUser | UUID,
@@ -529,6 +611,7 @@ class TelegramIntakeAdapter:
                 self._lifecycle.get_confirmation_view(
                     callback.request_id, context.user_id
                 )
+                self._dialog_modes.set_mode(context.user_id, "idle")
                 return TelegramIntakeOutcome(
                     "Выберите действие в главном меню.", key, IntakeFieldUpdate()
                 )
@@ -543,6 +626,7 @@ class TelegramIntakeAdapter:
                         key,
                         IntakeFieldUpdate(),
                     )
+                self._dialog_modes.set_mode(context.user_id, "intake")
                 return self._current_outcome(active, key)
             if callback.action in {"cancel_ask", "cancel_new_ask"}:
                 self._lifecycle.get_confirmation_view(
@@ -569,6 +653,7 @@ class TelegramIntakeAdapter:
                 if confirmed.replayed:
                     text = "Эта заявка уже зарегистрирована."
                 else:
+                    self._dialog_modes.set_mode(context.user_id, "intake")
                     self._awaiting_new_request_description.add(context.user_id)
                     text = (
                         "Заявка зарегистрирована.\n\n"
@@ -581,6 +666,7 @@ class TelegramIntakeAdapter:
                     IntakeFieldUpdate(),
                 )
             if callback.action == "edit":
+                self._dialog_modes.set_mode(context.user_id, "intake")
                 self._lifecycle.return_to_editing(
                     callback.request_id,
                     context.user_id,
@@ -618,8 +704,11 @@ class TelegramIntakeAdapter:
                 )
                 text = "Заявка отменена. Можно начать новую через меню."
                 if callback.action == "cancel_new_yes":
+                    self._dialog_modes.set_mode(context.user_id, "intake")
                     self._awaiting_new_request_description.add(context.user_id)
                     text += "\n\n" + NEW_REQUEST_PROMPT
+                else:
+                    self._dialog_modes.set_mode(context.user_id, "idle")
                 return TelegramIntakeOutcome(
                     text,
                     key,
@@ -627,12 +716,11 @@ class TelegramIntakeAdapter:
                     reply_markup=(
                         None
                         if callback.action == "cancel_new_yes"
-                        else new_request_action(
-                            cancelled.request_id, cancelled.version
-                        )
+                        else new_request_action(cancelled.request_id, cancelled.version)
                     ),
                 )
             if callback.action == "new":
+                self._dialog_modes.set_mode(context.user_id, "intake")
                 self._lifecycle.get_confirmation_view(
                     callback.request_id, context.user_id
                 )
@@ -643,9 +731,7 @@ class TelegramIntakeAdapter:
                         key,
                         IntakeFieldUpdate(),
                         active,
-                        active_draft_actions(
-                            active.request_id, active.request_version
-                        ),
+                        active_draft_actions(active.request_id, active.request_version),
                     )
                 if context.user_id in self._awaiting_new_request_description:
                     return TelegramIntakeOutcome(
@@ -679,6 +765,123 @@ class TelegramIntakeAdapter:
         except LifecyclePersistenceError:
             return self._technical_error(key)
 
+    def _handle_regulation_question(
+        self,
+        user_id: UUID,
+        key: str,
+        text: str,
+    ) -> TelegramIntakeOutcome:
+        if self._regulation_qa is None:
+            return TelegramIntakeOutcome(
+                "Сейчас не удалось обратиться к базе регламентов. "
+                "Попробуйте повторить вопрос позже.",
+                key,
+                IntakeFieldUpdate(),
+                reply_markup=regulation_actions(),
+            )
+        fingerprint = sha256(text.strip().encode("utf-8")).hexdigest()
+        try:
+            replay = self._dialog_modes.find_regulation_replay(
+                user_id,
+                key,
+                fingerprint,
+            )
+        except DialogReplayConflictError:
+            return TelegramIntakeOutcome(
+                "Это сообщение уже было обработано. Отправьте вопрос ещё раз.",
+                key,
+                IntakeFieldUpdate(),
+                reply_markup=regulation_actions(),
+            )
+        if replay is not None:
+            outcome = TelegramIntakeOutcome(
+                format_regulation_answer(replay),
+                key,
+                IntakeFieldUpdate(),
+                reply_markup=regulation_actions(),
+                replayed=True,
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+        result = self._regulation_qa.answer(text)
+        self._dialog_modes.save_regulation_replay(
+            user_id,
+            key,
+            fingerprint,
+            result,
+        )
+        diagnostics = result.diagnostics
+        logger.info(
+            "Telegram regulation answer message_ref=%s mode=regulation_qa "
+            "retrieval_status=%s chunks=%s sources=%s duration_ms=%s "
+            "reason_code=%s error_code=%s",
+            sha256(key.encode("utf-8")).hexdigest()[:12],
+            diagnostics.get("retrieval_status"),
+            diagnostics.get("chunk_count", 0),
+            diagnostics.get("source_count", 0),
+            diagnostics.get("duration_ms", 0),
+            result.refusal_reason,
+            diagnostics.get("error_code"),
+        )
+        outcome = TelegramIntakeOutcome(
+            format_regulation_answer(result),
+            key,
+            IntakeFieldUpdate(),
+            reply_markup=regulation_actions(),
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _history_outcome(self, user_id: UUID, key: str) -> TelegramIntakeOutcome:
+        if self._request_history is None:
+            return self._technical_error(key)
+        try:
+            items = self._request_history.list_recent(user_id, limit=5)
+        except RequestHistoryError:
+            return self._technical_error(key)
+        buttons = (
+            history_actions(
+                [
+                    (item.request_id, item.request_number or "Без номера")
+                    for item in items
+                ]
+            )
+            if items
+            else empty_history_actions()
+        )
+        return TelegramIntakeOutcome(
+            format_history_list(items),
+            key,
+            IntakeFieldUpdate(),
+            reply_markup=buttons,
+        )
+
+    def _history_card_outcome(
+        self,
+        user_id: UUID,
+        request_id: UUID,
+        key: str,
+    ) -> TelegramIntakeOutcome:
+        if self._request_history is None:
+            return self._technical_error(key)
+        try:
+            view = self._request_history.get(request_id, user_id)
+        except RequestHistoryError:
+            return self._technical_error(key)
+        if view is None:
+            return TelegramIntakeOutcome(
+                "Заявка не найдена или недоступна.",
+                key,
+                IntakeFieldUpdate(),
+                reply_markup=history_card_actions(),
+            )
+        return TelegramIntakeOutcome(
+            format_history_card(view),
+            key,
+            IntakeFieldUpdate(),
+            reply_markup=history_card_actions(),
+        )
+
     def _handle_conflict_callback(
         self,
         user: ResolvedTelegramUser,
@@ -694,9 +897,7 @@ class TelegramIntakeAdapter:
         ):
             return self._stale_outcome(user.user_id, callback.request_id, key)
         conflict = active.intake_result.draft.conflicts[0]
-        resolution = (
-            "accept" if callback.action == "conflict_accept" else "keep"
-        )
+        resolution = "accept" if callback.action == "conflict_accept" else "keep"
         update = IntakeFieldUpdate(
             source=UpdateSource.USER,
             resolve_conflict_id=conflict.id,
@@ -929,9 +1130,7 @@ def _user_context(user: ResolvedTelegramUser | UUID) -> ResolvedTelegramUser:
 
 
 def _conflict_resolution(text: str) -> str | None:
-    normalized = " ".join(
-        text.casefold().replace("ё", "е").strip(" .,!?:;«»\"").split()
-    )
+    normalized = " ".join(text.casefold().replace("ё", "е").strip(' .,!?:;«»"').split())
     if normalized in _ACCEPT_CONFLICT_REPLIES:
         return "accept"
     if normalized in _KEEP_CONFLICT_REPLIES:

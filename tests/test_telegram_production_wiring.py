@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import app.bot.__main__ as bot_main
+from app.bot.dialog_modes import InMemoryDialogModeRepository
 from app.bot.formatters import format_request_card
 from app.bot.handlers import handle_text_message
+from app.bot.keyboards import MENU_REGULATIONS
 from app.bot.normalization import NaturalDateParser
 from app.bot.parser import DeterministicIntakeParser
 from app.core.config import Settings
@@ -19,6 +21,12 @@ from app.intake.service import RequestIntakeService
 from app.intake_persistence.repositories import (
     InMemoryIntakePersistenceRepository,
 )
+from app.rag.answering import (
+    FakeGroundedAnswerProvider,
+    GroundedAnswerPayload,
+    GroundedClaim,
+)
+from app.rag.models import HybridRetrievalResult
 from app.schemas.user import UserRead
 
 USER_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -109,6 +117,11 @@ def _build(monkeypatch, provider: SequenceProvider):
         "OpenAIApprovalExtractionProvider",
         lambda **_kwargs: provider,
     )
+    monkeypatch.setattr(
+        bot_main,
+        "SupabaseDialogModeRepository",
+        lambda _client: InMemoryDialogModeRepository(),
+    )
     settings = Settings(
         _env_file=None,
         supabase_url="https://example.invalid",
@@ -158,9 +171,9 @@ def _application_result(
         fallback_on_error=True,
     )
     assert resolution.update is not None
-    return RequestIntakeService().process_step(
-        RequestDraftData(), resolution.update
-    ).draft
+    return (
+        RequestIntakeService().process_step(RequestDraftData(), resolution.update).draft
+    )
 
 
 def _assert_canonical_parity(actual: RequestDraftData, expected: RequestDraftData):
@@ -178,6 +191,125 @@ def _assert_canonical_parity(actual: RequestDraftData, expected: RequestDraftDat
         assert getattr(actual, field_name) == getattr(expected, field_name)
 
 
+def test_regulation_mode_uses_production_wiring_without_intake_or_extra_clients(
+    monkeypatch,
+) -> None:
+    supabase_client = object()
+    openai_client = object()
+    intake_repository = InMemoryIntakePersistenceRepository()
+    retrieval_calls: list[str] = []
+    constructor_clients: list[object] = []
+    chunk = HybridRetrievalResult(
+        chunk_id=UUID("99999999-9999-4999-8999-999999999999"),
+        document_id="kb-009",
+        source_filename="09_Правила_согласования.md",
+        document_title="Правила согласования заявок",
+        document_type="approval_rules",
+        section_path="Матрица согласования",
+        content="Правило согласования.",
+        priority=1,
+        hybrid_score=0.03,
+    )
+
+    class Retrieval:
+        default_top_k = 5
+        default_rrf_k = 60
+
+        def search(self, query):
+            retrieval_calls.append(query)
+            return [chunk]
+
+    answer_provider = FakeGroundedAnswerProvider(
+        GroundedAnswerPayload(
+            answer="Согласование определено матрицей.",
+            claims=[
+                GroundedClaim(
+                    text="Согласование определено матрицей.",
+                    cited_chunk_ids=[str(chunk.chunk_id)],
+                )
+            ],
+            insufficient_context=False,
+            source_conflict=False,
+        )
+    )
+    monkeypatch.setattr(bot_main, "create_client", lambda *_: supabase_client)
+    monkeypatch.setattr(bot_main, "OpenAI", lambda **_kwargs: openai_client)
+    monkeypatch.setattr(
+        bot_main,
+        "SupabaseTelegramUserRepository",
+        lambda client: FakeUserRepository(),
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "SupabaseIntakePersistenceRepository",
+        lambda client: intake_repository,
+    )
+    monkeypatch.setattr(
+        bot_main, "SupabaseApprovalRuleRepository", lambda client: object()
+    )
+    monkeypatch.setattr(bot_main, "ApprovalRuleService", lambda repository: None)
+    monkeypatch.setattr(
+        bot_main, "SupabaseRequestLifecycleRepository", lambda client: object()
+    )
+    monkeypatch.setattr(
+        bot_main, "RequestLifecycleService", lambda repository, intake: None
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "OpenAIApprovalExtractionProvider",
+        lambda **_kwargs: SequenceProvider([]),
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "SupabaseDialogModeRepository",
+        lambda client: InMemoryDialogModeRepository(),
+    )
+    monkeypatch.setattr(
+        bot_main, "SupabaseRequestHistoryRepository", lambda client: object()
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "SupabaseKnowledgeRepository",
+        lambda client: constructor_clients.append(client) or object(),
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "OpenAIEmbeddingProvider",
+        lambda **kwargs: constructor_clients.append(kwargs["client"]) or object(),
+    )
+    monkeypatch.setattr(
+        bot_main, "KnowledgeRetrievalService", lambda *_args, **_kwargs: Retrieval()
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "OpenAIGroundedAnswerProvider",
+        lambda **kwargs: (
+            constructor_clients.append(kwargs["client"]) or answer_provider
+        ),
+    )
+    settings = Settings(
+        _env_file=None,
+        supabase_url="https://example.invalid",
+        supabase_service_role_key="test-only",
+        openai_api_key="test-only",
+        approval_extraction_model="test-model",
+        rag_answer_model="test-model",
+        telegram_extraction_mode="hybrid",
+    )
+    dependencies = bot_main.build_dependencies(settings)
+
+    asyncio.run(handle_text_message(FakeMessage(MENU_REGULATIONS, 900), dependencies))
+    question = FakeMessage("Кто согласует закупку?", 901)
+    asyncio.run(handle_text_message(question, dependencies))
+
+    assert len(retrieval_calls) == 3
+    assert "матрица согласования" in retrieval_calls[1]
+    assert len(answer_provider.calls) == 1
+    assert intake_repository.storage.requests == {}
+    assert "Источники:" in question.answers[0]
+    assert constructor_clients == [supabase_client, openai_client, openai_client]
+
+
 def test_goods_scenario_uses_production_wiring_and_persists_inferred_unit(
     monkeypatch,
 ) -> None:
@@ -186,19 +318,19 @@ def test_goods_scenario_uses_production_wiring_and_persists_inferred_unit(
         "на Невском в срок через неделю"
     )
     raw = _raw(
-                procurement_type_raw="goods",
-                item_name_raw="лампочки",
-                specifications_raw="для замены перегоревших",
-                category_raw="G14",
-                delivery_location_raw="офис на Невском",
-                evidence_by_field={
-                    "procurement_type": "купить",
-                    "item_name": "лампочек",
-                    "specifications": "на случай замены перегоревших",
-                    "category": "лампочек",
-                    "delivery_location": "офисе на Невском",
-                },
-            )
+        procurement_type_raw="goods",
+        item_name_raw="лампочки",
+        specifications_raw="для замены перегоревших",
+        category_raw="G14",
+        delivery_location_raw="офис на Невском",
+        evidence_by_field={
+            "procurement_type": "купить",
+            "item_name": "лампочек",
+            "specifications": "на случай замены перегоревших",
+            "category": "лампочек",
+            "delivery_location": "офисе на Невском",
+        },
+    )
     provider = SequenceProvider([raw])
     dependencies, _ = _build(monkeypatch, provider)
     initial = FakeMessage(text, 100)
@@ -234,21 +366,21 @@ def test_service_volume_and_deadline_survive_production_persistence(
         "В бюджете учтено"
     )
     raw = _raw(
-                procurement_type_raw="service",
-                item_name_raw="заправка картриджей",
-                specifications_raw="для офисных принтеров",
-                category_raw="S15",
-                budget_status_raw="budgeted",
-                delivery_location_raw="офис на Гражданском",
-                evidence_by_field={
-                    "procurement_type": "заправку",
-                    "item_name": "заправку четырех картриджей",
-                    "specifications": "для офисных принтеров",
-                    "category": "заправку",
-                    "budget_status": "В бюджете учтено",
-                    "delivery_location": "офис на Гражданском",
-                },
-            )
+        procurement_type_raw="service",
+        item_name_raw="заправка картриджей",
+        specifications_raw="для офисных принтеров",
+        category_raw="S15",
+        budget_status_raw="budgeted",
+        delivery_location_raw="офис на Гражданском",
+        evidence_by_field={
+            "procurement_type": "заправку",
+            "item_name": "заправку четырех картриджей",
+            "specifications": "для офисных принтеров",
+            "category": "заправку",
+            "budget_status": "В бюджете учтено",
+            "delivery_location": "офис на Гражданском",
+        },
+    )
     provider = SequenceProvider([raw])
     dependencies, _ = _build(monkeypatch, provider)
     message = FakeMessage(text, 200)
@@ -278,19 +410,19 @@ def test_full_location_and_one_response_per_message_in_production_wiring(
         "в бюджете, 5 тыс. руб."
     )
     initial_raw = _raw(
-                procurement_type_raw="service",
-                item_name_raw="мойка окон",
-                category_raw="S02",
-                budget_status_raw="budgeted",
-                delivery_location_raw="в переговорной",
-                evidence_by_field={
-                    "procurement_type": "помыть",
-                    "item_name": "помыть окна",
-                    "category": "помыть окна",
-                    "budget_status": "в бюджете",
-                    "delivery_location": "в переговорной",
-                },
-            )
+        procurement_type_raw="service",
+        item_name_raw="мойка окон",
+        category_raw="S02",
+        budget_status_raw="budgeted",
+        delivery_location_raw="в переговорной",
+        evidence_by_field={
+            "procurement_type": "помыть",
+            "item_name": "помыть окна",
+            "category": "помыть окна",
+            "budget_status": "в бюджете",
+            "delivery_location": "в переговорной",
+        },
+    )
     provider = SequenceProvider(
         [
             initial_raw,
@@ -358,14 +490,10 @@ def test_budgeted_service_requirements_use_production_wiring(monkeypatch) -> Non
             ),
             _raw(
                 desired_result_raw="проведено регулярное",
-                specifications_raw=(
-                    "мастер должен работать в рамках рабочего дня"
-                ),
+                specifications_raw=("мастер должен работать в рамках рабочего дня"),
                 evidence_by_field={
                     "desired_result": "проведено регулярное",
-                    "specifications": (
-                        "мастер должен работать в рамках рабочего дня"
-                    ),
+                    "specifications": ("мастер должен работать в рамках рабочего дня"),
                 },
             ),
         ]

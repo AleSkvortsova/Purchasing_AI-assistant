@@ -13,7 +13,14 @@ Embeddings хорошо находят смысловые совпадения, 
 - PostgreSQL full-text search;
 - Reciprocal Rank Fusion (RRF) по позициям кандидатов.
 
-Генерация ответа и применение найденного правила не входят в этот этап.
+Сам retrieval по-прежнему только ранжирует чанки. Application-level grounded
+answer поверх него описан в `docs/regulation_qa.md`; retrieval contract, RPC и
+индекс для Telegram не дублируются.
+
+Regulation Q&A может детерминированно выполнить до трёх запросов через этот же
+service и объединить их позиции через RRF. Это application-level query
+expansion: SQL-функции, embeddings, candidate contracts и индексы остаются
+прежними.
 
 ## Full-text search
 
@@ -157,5 +164,6 @@ production retrieval.
 - FTS и embeddings не вычисляют числовые диапазоны.
 - Нет rule engine и структурированной таблицы правил.
 - Нет table-aware rechunking и reranker.
-- Retrieval возвращает чанки, но не генерирует итоговый ответ.
+- Retrieval возвращает чанки; отдельный grounded answer service формирует ответ
+  только из них и не меняет ранжирование.
 - Веса RRF требуют проверки на реальном evaluation-наборе после миграции.

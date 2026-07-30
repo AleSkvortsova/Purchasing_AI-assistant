@@ -9,10 +9,24 @@ from aiogram.types import (
 )
 
 MENU_NEW = "📝 Новая заявка"
-MENU_CURRENT = "📋 Текущая заявка"
-MENU_EXAMPLES = "💡 Примеры заявок"
-MENU_HELP = "ℹ️ Помощь"
-MENU_COMMANDS = {MENU_NEW, MENU_CURRENT, MENU_EXAMPLES, MENU_HELP}
+MENU_CURRENT = "📌 Текущая заявка"
+MENU_MY_REQUESTS = "📂 Мои заявки"
+MENU_INSTRUCTION = "ℹ️ Инструкция"
+MENU_REGULATIONS = "📚 Спросить по регламенту"
+LEGACY_MENU_EXAMPLES = "💡 Примеры заявок"
+LEGACY_MENU_HELP = "ℹ️ Помощь"
+# Import compatibility for integrations compiled against the previous menu.
+MENU_EXAMPLES = LEGACY_MENU_EXAMPLES
+MENU_HELP = LEGACY_MENU_HELP
+MENU_COMMANDS = {
+    MENU_NEW,
+    MENU_CURRENT,
+    MENU_MY_REQUESTS,
+    MENU_INSTRUCTION,
+    MENU_REGULATIONS,
+    LEGACY_MENU_EXAMPLES,
+    LEGACY_MENU_HELP,
+}
 
 _PREFIX = "rq"
 
@@ -24,14 +38,58 @@ class RequestCallback:
     version: int
 
 
+@dataclass(frozen=True)
+class NavigationCallback:
+    action: str
+    request_id: UUID | None = None
+
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MENU_NEW), KeyboardButton(text=MENU_CURRENT)],
-            [KeyboardButton(text=MENU_EXAMPLES), KeyboardButton(text=MENU_HELP)],
+            [KeyboardButton(text=MENU_MY_REQUESTS)],
+            [KeyboardButton(text=MENU_INSTRUCTION)],
+            [KeyboardButton(text=MENU_REGULATIONS)],
         ],
         resize_keyboard=True,
         is_persistent=True,
+    )
+
+
+def instruction_actions() -> InlineKeyboardMarkup:
+    return _navigation_inline(
+        ("📝 Новая заявка", "new", None),
+        ("📚 Спросить по регламенту", "regulations", None),
+        ("Главное меню", "menu", None),
+    )
+
+
+def regulation_actions() -> InlineKeyboardMarkup:
+    return _navigation_inline(
+        ("⬅️ Главное меню", "menu", None),
+    )
+
+
+def empty_history_actions() -> InlineKeyboardMarkup:
+    return _navigation_inline(
+        ("📝 Новая заявка", "new", None),
+        ("Главное меню", "menu", None),
+    )
+
+
+def history_actions(requests: list[tuple[UUID, str]]) -> InlineKeyboardMarkup:
+    buttons = [
+        (f"Открыть {number}", "request", request_id) for request_id, number in requests
+    ]
+    buttons.append(("Главное меню", "menu", None))
+    return _navigation_inline(*buttons)
+
+
+def history_card_actions() -> InlineKeyboardMarkup:
+    return _navigation_inline(
+        ("Назад к моим заявкам", "history", None),
+        ("Главное меню", "menu", None),
     )
 
 
@@ -126,6 +184,28 @@ def parse_callback(value: str | None) -> RequestCallback:
     return RequestCallback(action, UUID(hex=raw_id), version)
 
 
+def encode_navigation_callback(
+    action: str,
+    request_id: UUID | None = None,
+) -> str:
+    value = f"nav:{action}"
+    if request_id is not None:
+        value += f":{request_id.hex}"
+    if len(value.encode("utf-8")) > 64:
+        raise ValueError("Telegram callback_data exceeds 64 bytes")
+    return value
+
+
+def parse_navigation_callback(value: str | None) -> NavigationCallback:
+    if not value:
+        raise ValueError("Missing callback data")
+    parts = value.split(":", maxsplit=2)
+    if len(parts) < 2 or parts[0] != "nav" or not parts[1]:
+        raise ValueError("Unsupported navigation callback data")
+    request_id = UUID(hex=parts[2]) if len(parts) == 3 else None
+    return NavigationCallback(parts[1], request_id)
+
+
 def _inline(
     *buttons: tuple[str, str],
     request_id: UUID,
@@ -140,5 +220,21 @@ def _inline(
                 )
             ]
             for label, action in buttons
+        ]
+    )
+
+
+def _navigation_inline(
+    *buttons: tuple[str, str, UUID | None],
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=encode_navigation_callback(action, request_id),
+                )
+            ]
+            for label, action, request_id in buttons
         ]
     )

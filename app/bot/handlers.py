@@ -91,12 +91,12 @@ async def handle_callback_query(
             dependencies.user_resolver.resolve_user,
             _profile_from_callback(callback),
         )
-        outcome = await asyncio.to_thread(
-            dependencies.intake_adapter.handle_callback,
-            user,
-            callback.id,
-            callback.data,
+        handler = (
+            dependencies.intake_adapter.handle_navigation_callback
+            if callback.data and callback.data.startswith("nav:")
+            else dependencies.intake_adapter.handle_callback
         )
+        outcome = await asyncio.to_thread(handler, user, callback.id, callback.data)
         if isinstance(callback.message, Message):
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
@@ -144,6 +144,7 @@ def create_router(dependencies: TelegramHandlerDependencies) -> Router:
     router.message.register(start, CommandStart())
     router.message.register(text_message, F.text, ~F.text.startswith("/"))
     router.callback_query.register(lifecycle_callback, F.data.startswith("rq:"))
+    router.callback_query.register(lifecycle_callback, F.data.startswith("nav:"))
     return router
 
 
