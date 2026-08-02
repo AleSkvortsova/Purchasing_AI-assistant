@@ -16,7 +16,9 @@ from app.rag.models import SearchResult  # noqa: E402
 from app.rag.regulation_queries import (  # noqa: E402
     build_regulation_query_plan,
     fuse_regulation_results,
+    matching_intents,
     select_relevant_regulation_chunks,
+    source_kind,
 )
 from app.rag.repository import SupabaseKnowledgeRepository  # noqa: E402
 from supabase import create_client  # noqa: E402
@@ -184,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         "text_query": plan.text_query,
         "broad_query": plan.broad_query,
         "intent": plan.intent,
+        "intents": list(plan.intents),
+        "understanding": plan.understanding.model_dump(mode="json"),
         "variants": variant_reports,
         "final_candidates": [
             _result_row(
@@ -192,6 +196,29 @@ def main(argv: list[str] | None = None) -> int:
                 chunk_indexes=chunk_indexes,
                 threshold=settings.rag_similarity_threshold,
             )
+            for rank, item in enumerate(fused, start=1)
+        ],
+        "relevance_decisions": [
+            {
+                **_result_row(
+                    item,
+                    rank=rank,
+                    chunk_indexes=chunk_indexes,
+                    threshold=settings.rag_similarity_threshold,
+                ),
+                "source_kind": source_kind(item.document_type),
+                "matched_intents": list(matching_intents(plan, item)),
+                "accepted": item in selected,
+                "decision": (
+                    "accepted"
+                    if item in selected
+                    else (
+                        "example_or_template_excluded"
+                        if source_kind(item.document_type) in {"example", "template"}
+                        else "intent_or_context_limit"
+                    )
+                ),
+            }
             for rank, item in enumerate(fused, start=1)
         ],
         "chunks_passed_to_answer_provider": [

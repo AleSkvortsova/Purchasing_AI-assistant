@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.bot.categories import DeterministicCategoryClassifier
 from app.bot.dialog_modes import (
+    DialogModePersistenceError,
     DialogModeRepository,
     DialogReplayConflictError,
     InMemoryDialogModeRepository,
@@ -61,6 +62,7 @@ from app.intake_persistence.models import (
     PersistentIntakeStepResult,
 )
 from app.rag.answering import RegulationQuestionAnsweringService
+from app.rag.conversation import answer_regulation_turn
 from app.request_lifecycle.exceptions import (
     LifecycleConcurrentUpdateError,
     LifecycleOwnershipError,
@@ -803,13 +805,22 @@ class TelegramIntakeAdapter:
             )
             self._remember_message_outcome(key, outcome)
             return outcome
-        result = self._regulation_qa.answer(text)
-        self._dialog_modes.save_regulation_replay(
-            user_id,
-            key,
-            fingerprint,
-            result,
-        )
+        try:
+            pending = self._dialog_modes.get_pending_regulation(user_id)
+            turn = answer_regulation_turn(self._regulation_qa, text, pending)
+            result = turn.result
+            if turn.pending is None:
+                self._dialog_modes.clear_pending_regulation(user_id)
+            else:
+                self._dialog_modes.save_pending_regulation(user_id, turn.pending)
+            self._dialog_modes.save_regulation_replay(
+                user_id,
+                key,
+                fingerprint,
+                result,
+            )
+        except DialogModePersistenceError:
+            return self._technical_error(key)
         diagnostics = result.diagnostics
         logger.info(
             "Telegram regulation answer message_ref=%s mode=regulation_qa "

@@ -15,6 +15,7 @@ from app.rag.answering import (  # noqa: E402
     OpenAIGroundedAnswerProvider,
     RegulationQuestionAnsweringService,
     _concrete_values,
+    clarifying_question_for,
 )
 from app.rag.embeddings import OpenAIEmbeddingProvider  # noqa: E402
 from app.rag.regulation_queries import build_regulation_query_plan  # noqa: E402
@@ -28,6 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Read-only local diagnostics for regulation answer validation"
     )
     parser.add_argument("question", help="Regulation question to diagnose")
+    parser.add_argument(
+        "--show-structured-output",
+        action="store_true",
+        help=(
+            "Print the parsed structured answer without the prompt, document "
+            "text, request body, or raw API response"
+        ),
+    )
     return parser
 
 
@@ -44,6 +53,29 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    plan = build_regulation_query_plan(args.question)
+    clarification = clarifying_question_for(plan)
+    if clarification is not None:
+        print(
+            json.dumps(
+                {
+                    "read_only": True,
+                    "question": args.question,
+                    "intent": plan.intent,
+                    "intents": list(plan.intents),
+                    "understanding": plan.understanding.model_dump(mode="json"),
+                    "query_variants": list(plan.variants),
+                    "provider_called": False,
+                    "result": {
+                        "status": "clarification_required",
+                        "clarifying_question": clarification,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     client = create_client(
         str(settings.supabase_url),
         str(settings.supabase_service_role_key),
@@ -78,12 +110,14 @@ def main(argv: list[str] | None = None) -> int:
         client=openai_client,
     )
     service = RegulationQuestionAnsweringService(retrieval, provider)
-    plan = build_regulation_query_plan(args.question)
     outcome = service.retrieve(plan)
     payload = provider.generate(args.question, outcome.chunks)
     report = {
         "read_only": True,
         "question": args.question,
+        "intent": plan.intent,
+        "intents": list(plan.intents),
+        "understanding": plan.understanding.model_dump(mode="json"),
         "query_variants": list(plan.variants),
         "chunks": [
             {
@@ -106,6 +140,11 @@ def main(argv: list[str] | None = None) -> int:
                 }
             ),
         },
+        "structured_output": (
+            payload.model_dump(mode="json")
+            if args.show_structured_output
+            else None
+        ),
         "question_concrete_values": sorted(_concrete_values(args.question)),
         "claim_concrete_values": {
             str(index): sorted(_concrete_values(claim.text))
@@ -120,11 +159,10 @@ def main(argv: list[str] | None = None) -> int:
         "result": None,
     }
     try:
-        result = service._validate(
+        result = service.validate_payload(
             payload,
-            outcome.chunks,
-            plan,
-            time.perf_counter(),
+            outcome,
+            started=time.perf_counter(),
         )
     except ValueError as exc:
         report["validation_rule"] = str(exc).split(":", maxsplit=1)[0]

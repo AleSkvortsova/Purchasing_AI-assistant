@@ -19,7 +19,10 @@ def _chunk(
     chunk_id: str,
     document_id: str,
     title: str,
-    content: str = "Матрица согласования определяет согласующих и срок ответа.",
+    content: str = (
+        "Матрица согласования определяет согласующих и срок ответа. "
+        "Бюджетная закупка до 100000 руб | Руководитель подразделения."
+    ),
     document_type: str = "approval_rules",
 ) -> HybridRetrievalResult:
     return HybridRetrievalResult(
@@ -95,13 +98,14 @@ def test_grounded_answer_uses_retrieved_chunks_and_deduplicates_sources() -> Non
     )
 
     result = RegulationQuestionAnsweringService(retrieval, provider).answer(
-        "Кто согласует закупку?"
+        "Кто согласует закупку на 100000 рублей, предусмотренную бюджетом?"
     )
 
     assert result.status == "answered"
     assert len(retrieval.calls) == 3
     assert "матрица согласования" in retrieval.calls[1]
-    assert len(provider.calls) == 1
+    assert provider.calls == []
+    assert result.diagnostics["deterministic_resolution"] is True
     assert [source.document_id for source in result.sources] == ["kb-009"]
     assert result.sources[0].display_name == "Правила согласования"
     assert result.sources[0].chunk_id is not None
@@ -149,26 +153,28 @@ def test_no_chunks_returns_insufficient_context_without_provider() -> None:
     ("retrieval", "provider"),
     [
         (FakeRetrieval(error=RetrievalError("offline")), FakeGroundedAnswerProvider()),
-        (FakeRetrieval([CHUNK_A]), FailingProvider()),
     ],
 )
 def test_technical_failures_return_unavailable(retrieval, provider) -> None:
-    result = RegulationQuestionAnsweringService(retrieval, provider).answer("Вопрос")
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Кто согласует закупку на 100000 рублей, предусмотренную бюджетом?"
+    )
     assert result.status == "unavailable"
     assert result.sources == []
 
 
 @pytest.mark.parametrize("cited_ids", [[], ["unknown-chunk"]])
-def test_unsupported_answer_without_retrieved_evidence_is_rejected(cited_ids) -> None:
+def test_invalid_provider_evidence_uses_deterministic_rule(cited_ids) -> None:
     provider = FakeGroundedAnswerProvider(
         _payload("Неподтверждённый ответ", cited_ids)
     )
     result = RegulationQuestionAnsweringService(
         FakeRetrieval([CHUNK_A]), provider
-    ).answer("Вопрос")
-    assert result.status == "insufficient_context"
-    assert result.refusal_reason == "unsupported_answer"
-    assert result.sources == []
+    ).answer("Кто согласует закупку на 100000 рублей, предусмотренную бюджетом?")
+    assert result.status == "answered"
+    assert result.diagnostics["deterministic_resolution"] is True
+    assert provider.calls == []
+    assert [source.document_id for source in result.sources] == ["kb-009"]
 
 
 def test_long_verbatim_source_copy_is_rejected() -> None:
@@ -204,14 +210,13 @@ def test_questions_keep_separate_retrieval_contexts() -> None:
     provider = FakeGroundedAnswerProvider()
     service = RegulationQuestionAnsweringService(retrieval, provider)
 
-    service.answer("Первый вопрос")
-    service.answer("Второй вопрос")
+    first = "Кто согласует закупку на 100000 рублей, предусмотренную бюджетом?"
+    second = "Кто согласует закупку на 90000 рублей, предусмотренную бюджетом?"
+    service.answer(first)
+    service.answer(second)
 
-    assert len(retrieval.calls) == 2
-    assert [call[0] for call in provider.calls] == [
-        "Первый вопрос",
-        "Второй вопрос",
-    ]
+    assert len(retrieval.calls) == 6
+    assert provider.calls == []
 
 
 def test_openai_provider_uses_strict_payload_and_safe_request_contract() -> None:
@@ -245,6 +250,30 @@ def test_openai_provider_uses_strict_payload_and_safe_request_contract() -> None
     assert kwargs["timeout"] == 12
     assert "cited_chunk_ids" in kwargs["instructions"]
     assert str(CHUNK_A.chunk_id) in kwargs["input"]
+
+
+def test_openai_provider_repair_uses_safe_reason_without_original_output() -> None:
+    client = Mock()
+    client.responses.parse.return_value = SimpleNamespace(
+        output_parsed=GroundedAnswerPayload(
+            answer="Ответ",
+            claims=[],
+            insufficient_context=True,
+            source_conflict=False,
+        )
+    )
+    provider = OpenAIGroundedAnswerProvider(
+        api_key="test-only",
+        model="test-model",
+        client=client,
+    )
+
+    provider.repair("Вопрос", [CHUNK_A], "unknown_chunk_id")
+
+    kwargs = client.responses.parse.call_args.kwargs
+    assert "unknown_chunk_id" in kwargs["instructions"]
+    assert "Предыдущий структурированный ответ" in kwargs["instructions"]
+    assert "API key" not in kwargs["instructions"]
 
 
 def test_grounded_payload_schema_is_closed_and_all_fields_are_required() -> None:

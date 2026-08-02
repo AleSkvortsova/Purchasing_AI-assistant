@@ -109,6 +109,24 @@ STATUS = _result(
     "Статус «Требует доработки» означает, что закупщик указал, какие сведения "
     "нужно дополнить.",
 )
+STATUS_APPROVAL = _result(
+    "7a777777-7777-4777-8777-777777777777",
+    "kb-007",
+    "status_guide",
+    "Статусы и переходы заявок",
+    "Допустимые переходы",
+    "На согласовании: требуется решение. На согласовании → Принята в работу "
+    "→ В работе → Отклонена.",
+)
+CANCELLATION = _result(
+    "7c777777-7777-4777-8777-777777777777",
+    "kb-001",
+    "regulation",
+    "Регламент подачи и обработки заявок",
+    "Отмена заявки",
+    "Инициатор может отменить заявку до статуса «Принята в работу». "
+    "После начала закупки отмена согласуется с закупщиком.",
+)
 APPROVAL_HIGH = _result(
     "88888888-8888-4888-8888-888888888888",
     "kb-009",
@@ -251,7 +269,8 @@ def test_mixed_categories_do_not_use_template_as_final_source() -> None:
     ).answer("Можно ли объединить товары, лицензии и услуги в одной заявке?")
     assert result.status == "answered"
     assert [source.document_id for source in result.sources] == ["kb-015"]
-    assert all(item.document_type != "template" for item in provider.calls[0][1])
+    assert provider.calls == []
+    assert result.diagnostics["deterministic_resolution"] is True
 
 
 def test_status_rework_is_answered_from_faq() -> None:
@@ -266,13 +285,52 @@ def test_status_rework_is_answered_from_faq() -> None:
     assert result.status == "answered"
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Что значит, что заявка на согласовании?",
+        "Заявка ушла на согласование — что сейчас происходит?",
+        "У заявки статус «На согласовании». Мне нужно что-то делать?",
+        "Кто сейчас рассматривает заявку, если она на согласовании?",
+    ],
+)
+def test_on_approval_status_uses_status_guide(question: str) -> None:
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([STATUS_APPROVAL]),
+        FakeGroundedAnswerProvider(),
+    ).answer(question)
+
+    assert result.status == "answered"
+    assert "требуется решение" in result.answer
+    assert [source.document_id for source in result.sources] == ["kb-007"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Можно отменить заявку со статусом «На согласовании»?",
+        "Можно снять заявку, если она уже в работе?",
+        "Потребность исчезла после передачи заявки в закупки.",
+    ],
+)
+def test_cancellation_question_does_not_return_status_overview(question: str) -> None:
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([CANCELLATION, STATUS_APPROVAL]),
+        FakeGroundedAnswerProvider(),
+    ).answer(question)
+
+    assert result.status == "answered"
+    assert "до статуса «Принята в работу»" in result.answer
+    assert "проходить статусы" not in result.answer
+
+
 def test_outside_question_refuses_without_provider() -> None:
     provider = FakeGroundedAnswerProvider()
     result = RegulationQuestionAnsweringService(
         StaticRetrieval([]), provider
     ).answer("Какой поставщик предлагает самые дешёвые ноутбуки?")
     assert result.status == "insufficient_context"
-    assert result.refusal_reason == "no_chunks"
+    assert result.refusal_reason == "outside_kb"
     assert provider.calls == []
 
 
@@ -282,7 +340,7 @@ def test_outside_question_refuses_even_with_nearby_supplier_chunk() -> None:
         StaticRetrieval([STATUS]), provider
     ).answer("Какой поставщик сейчас продаёт самые дешёвые ноутбуки?")
     assert result.status == "insufficient_context"
-    assert result.refusal_reason == "no_relevant_normative_chunks"
+    assert result.refusal_reason == "outside_kb"
     assert provider.calls == []
 
 
@@ -292,8 +350,8 @@ def test_ambiguous_approval_question_asks_for_missing_context() -> None:
     result = RegulationQuestionAnsweringService(retrieval, provider).answer(
         "Кто это согласует?"
     )
-    assert result.status == "insufficient_context"
-    assert result.refusal_reason == "ambiguous_question"
+    assert result.status == "clarification_required"
+    assert result.clarifying_question is not None
     assert "сумму закупки" in result.answer
     assert retrieval.calls == []
     assert provider.calls == []
@@ -476,3 +534,192 @@ def test_supported_urgent_event_uses_deterministic_provider_fallback(
     }
     assert forbidden_terms.isdisjoint(result.answer.casefold().split())
     assert [source.document_id for source in result.sources] == ["kb-006"]
+
+
+def _insufficient_payload(*, source_conflict: bool = False) -> GroundedAnswerPayload:
+    return GroundedAnswerPayload(
+        answer="",
+        claims=[],
+        insufficient_context=True,
+        source_conflict=source_conflict,
+    )
+
+
+def test_approval_without_budget_status_requests_clarification() -> None:
+    provider = FakeGroundedAnswerProvider()
+    retrieval = StaticRetrieval([APPROVAL])
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Кто согласует закупку на 180 000 рублей?"
+    )
+    assert result.status == "clarification_required"
+    assert result.clarifying_question == (
+        "Уточните, пожалуйста, предусмотрена ли закупка бюджетом. "
+        "От этого зависит маршрут согласования."
+    )
+    assert result.refusal_reason is None
+    assert retrieval.calls == []
+    assert provider.calls == []
+
+
+def test_budget_phrase_and_word_amount_use_approval_fallback() -> None:
+    matrix = _result(
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "kb-009",
+        "approval_rules",
+        "Правила согласования заявок",
+        "Матрица согласования",
+        "| Условие | Согласующие |\n"
+        "|---|---|\n"
+        "| Бюджетная закупка до 100 000 руб. | Руководитель подразделения |",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([matrix]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer(
+        "Мы хотим купить оборудование на 95 тысяч рублей, деньги в бюджете "
+        "есть. Какие согласования потребуются?"
+    )
+    assert result.status == "answered"
+    assert "Руководитель подразделения" in result.answer
+    assert [source.document_id for source in result.sources] == ["kb-009"]
+
+
+def test_general_urgency_question_uses_policy_without_case_parameters() -> None:
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([URGENCY_P2]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer("Какая заявка считается срочной?")
+    assert result.status == "answered"
+    assert "срок меньше нормативного" in result.answer
+    assert [source.document_id for source in result.sources] == ["kb-006"]
+
+
+def test_four_word_days_are_compared_with_goods_threshold() -> None:
+    goods_threshold = _result(
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "kb-006",
+        "urgency_rules",
+        "Правила срочности и приоритета",
+        "Нормативные сроки",
+        "Стандартный серийный товар | 10 рабочих дней",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([goods_threshold, URGENCY_P2]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer(
+        "Мне нужно получить товар через четыре дня. "
+        "Это будет считаться срочной закупкой?"
+    )
+    assert result.status == "answered"
+    assert "4 дня" in result.answer
+    assert "10 рабочих дней" in result.answer
+    assert "P2" in result.answer
+
+
+def test_multi_intent_event_answers_urgency_and_required_fields() -> None:
+    fields = _result(
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "kb-006",
+        "urgency_rules",
+        "Правила срочности и приоритета",
+        "Обязательные данные для срочной заявки",
+        "Обязательные данные для срочной заявки\n- причина срочности;\n"
+        "- последствия задержки;\n- подтверждение руководителя.",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([URGENCY_THRESHOLD, URGENCY_P2, fields]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer(
+        "Мероприятие состоится через десять дней, а подрядчика ещё не "
+        "выбрали. Как оформить такую заявку и будет ли она срочной?"
+    )
+    assert result.status == "answered"
+    assert "10 дней" in result.answer
+    assert "30 календарных дней" in result.answer
+    assert "причина срочности" in result.answer
+    assert "последствия задержки" in result.answer
+
+
+def test_urgent_fields_question_does_not_require_category_threshold() -> None:
+    fields = _result(
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "kb-006",
+        "urgency_rules",
+        "Правила срочности и приоритета",
+        "Обязательные данные для срочной заявки",
+        "Обязательные данные для срочной заявки\n- причина срочности;\n"
+        "- крайняя допустимая дата;\n- подтверждение руководителя.",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([fields]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer(
+        "До необходимой даты осталось две недели. Что нужно дополнительно "
+        "указать в заявке из-за срочности?"
+    )
+    assert result.status == "answered"
+    assert "причина срочности" in result.answer
+    assert result.refusal_reason is None
+
+
+def test_transferred_status_ignores_unconfirmed_provider_conflict() -> None:
+    status = _result(
+        "12121212-1212-4212-8212-121212121212",
+        "kb-007",
+        "status_guide",
+        "Статусы заявки и переходы",
+        "Статусы заявки и переходы",
+        "Передана в отдел закупок | Подтверждена и зарегистрирована\n"
+        "Передана в отдел закупок → Требует доработки → Принята в работу",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([status]),
+        FakeGroundedAnswerProvider(_insufficient_payload(source_conflict=True)),
+    ).answer(
+        "Что означает статус «Передана в отдел закупок»? "
+        "Мне нужно после этого что-то делать?"
+    )
+    assert result.status == "answered"
+    assert "подтверждена и зарегистрирована" in result.answer
+    assert "До запроса уточнений" in result.answer
+    assert [source.document_id for source in result.sources] == ["kb-007"]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "Нужно перевезти семь паллет из офиса на склад. Какие сведения "
+            "я должна указать, чтобы заявку приняли?",
+            ("7 паллет", "вес/объём", "даты", "погрузка"),
+        ),
+        (
+            "Хочу заказать разработку интеграции с нашей корпоративной "
+            "системой. Что обязательно написать в заявке?",
+            ("бизнес-требования", "результат", "приёмка"),
+        ),
+    ],
+)
+def test_category_fields_use_user_values_without_example_leakage(
+    question: str,
+    expected: tuple[str, ...],
+) -> None:
+    matrix = _result(
+        "13131313-1313-4313-8313-131313131313",
+        "kb-005",
+        "field_matrix",
+        "Матрица обязательных полей",
+        "Категориальные поля",
+        "| S03 Транспорт | маршрут, груз, вес/объём, даты, погрузка |\n"
+        "| S05 IT-разработка | бизнес-требования, интеграции, результат, приёмка |",
+    )
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([matrix]),
+        FakeGroundedAnswerProvider(_insufficient_payload()),
+    ).answer(question)
+    assert result.status == "answered"
+    assert all(value in result.answer for value in expected)
+    assert all(
+        value not in result.answer
+        for value in ("4 тонны", "Химки", "гидроборт", "35 000")
+    )

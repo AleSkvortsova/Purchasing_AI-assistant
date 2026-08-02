@@ -1,10 +1,15 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
 from app.bot.dialog_modes import SupabaseDialogModeRepository
 from app.bot.request_history import SupabaseRequestHistoryRepository
 from app.rag.answering import RegulationAnswer
+from app.rag.conversation import (
+    RegulationKnownSlots,
+    RegulationPendingClarification,
+)
 
 USER_ID = UUID("11111111-1111-4111-8111-111111111111")
 REQUEST_ID = UUID("22222222-2222-4222-8222-222222222222")
@@ -71,6 +76,46 @@ def test_dialog_mode_upsert_changes_only_intent_and_preserves_state_columns() ->
     assert upsert[2]["default_to_null"] is False
     assert "state_data" not in upsert[1][0]
     assert "active_request_id" not in upsert[1][0]
+
+
+def test_pending_regulation_state_preserves_existing_intake_state_data() -> None:
+    query = FakeQuery([{"state_data": {"intake_status": "collecting"}}])
+    repository = SupabaseDialogModeRepository(FakeClient(dialog_states=query))
+    pending = RegulationPendingClarification(
+        original_question="Кто согласует закупку на 240 тысяч?",
+        primary_intent="approval_route",
+        known_slots=RegulationKnownSlots(amount=Decimal("240000")),
+        missing_slots=("budget_status",),
+        clarifying_question="Предусмотрена ли закупка бюджетом?",
+    )
+
+    repository.save_pending_regulation(USER_ID, pending)
+
+    upsert = [call for call in query.calls if call[0] == "upsert"][-1][1][0]
+    assert upsert["state_data"]["intake_status"] == "collecting"
+    stored = upsert["state_data"]["regulation_pending_clarification"]
+    assert stored["known_slots"]["amount"] == "240000"
+    assert "retrieved_chunks" not in stored
+    assert "openai_payload" not in stored
+
+
+def test_leaving_regulation_mode_clears_only_pending_context() -> None:
+    query = FakeQuery(
+        [
+            {
+                "state_data": {
+                    "intake_status": "collecting",
+                    "regulation_pending_clarification": {"old": True},
+                }
+            }
+        ]
+    )
+    repository = SupabaseDialogModeRepository(FakeClient(dialog_states=query))
+
+    repository.set_mode(USER_ID, "idle")
+
+    upsert = [call for call in query.calls if call[0] == "upsert"][-1][1][0]
+    assert upsert["state_data"] == {"intake_status": "collecting"}
 
 
 def test_regulation_replay_log_contains_no_question_or_telegram_id() -> None:

@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 _SPACE_TRANSLATION = str.maketrans({"\u00a0": " ", "\u202f": " "})
 _DASHES = re.compile(r"[‐‑‒–—−]")
@@ -31,13 +32,76 @@ _NUMBER_WORDS = {
     "восемнадцать": 18,
     "девятнадцать": 19,
     "двадцать": 20,
+    "одного": 1,
+    "одной": 1,
+    "двух": 2,
+    "трех": 3,
+    "четырех": 4,
+    "пяти": 5,
+    "шести": 6,
+    "семи": 7,
+    "восьми": 8,
+    "девяти": 9,
+    "десяти": 10,
+    "одиннадцати": 11,
+    "двенадцати": 12,
+    "тринадцати": 13,
+    "четырнадцати": 14,
+    "пятнадцати": 15,
+    "шестнадцати": 16,
+    "семнадцати": 17,
+    "восемнадцати": 18,
+    "девятнадцати": 19,
+    "двадцати": 20,
     "тридцать": 30,
+    "сорок": 40,
+    "пятьдесят": 50,
+    "шестьдесят": 60,
+    "семьдесят": 70,
+    "восемьдесят": 80,
+    "девяносто": 90,
 }
-_TENS = {"двадцать": 20, "тридцать": 30}
+_TENS = {
+    key: value for key, value in _NUMBER_WORDS.items() if value >= 20
+}
 _ONES = {key: value for key, value in _NUMBER_WORDS.items() if value < 10}
 _WORD_NUMBER_PATTERN = "|".join(
     sorted(_NUMBER_WORDS, key=len, reverse=True)
 )
+_ONES_PATTERN = "|".join(sorted(_ONES, key=len, reverse=True))
+_NEGATIVE_BUDGET = re.compile(
+    r"\b(?:внебюджетн\w*|не\s+(?:забюджетирован\w*|заложен\w*|"
+    r"предусмотрен\w*(?:\s+(?:в\s+)?бюджет\w*)?)|"
+    r"(?:деньги|расход\w*)\s+не\s+(?:заложен\w*|учтен\w*)|"
+    r"денег\s+в\s+бюджет\w*\s+нет)\b"
+)
+_UNKNOWN_BUDGET = re.compile(
+    r"\b(?:бюджетн\w*\s+статус\s+неизвест\w*|"
+    r"(?:пока\s+)?не\s+подтвержден\w*|"
+    r"(?:не\s+уверен\w*|сомнева\w*),?.*(?:бюджет|план|финанс)\w*|"
+    r"возможн\w*,?.*(?:бюджет|план|финанс|залож|предусмотр|учтен)\w*|"
+    r"(?:не\s+зна\w*|непонятн\w*),?.*предусмотрен\w*\s+ли|"
+    r"(?:не\s+зна\w*|непонятн\w*),?\s+(?:есть|предусмотрен\w*)\s+ли\s+"
+    r"(?:она\s+)?(?:в\s+)?бюджет\w*|"
+    r"(?:не\s+зна\w*|непонятн\w*),?\s+предусмотрен\w*\s+ли\s+"
+    r"(?:она\s+)?бюджет\w*|"
+    r"неизвест\w*,?\s+(?:есть|предусмотрен\w*)\s+ли\s+"
+    r"(?:деньги\s+в\s+)?бюджет\w*)\b"
+)
+_POSITIVE_BUDGET = re.compile(
+    r"\b(?:забюджетирован\w*|предусмотрен\w*\s+(?:в\s+)?бюджет\w*|"
+    r"деньги\s+в\s+бюджет\w*\s+есть|"
+    r"расход\w*\s+(?:предусмотрен\w*\s+план\w*|заложен\w*(?:\s+в\s+бюджет\w*)?)|"
+    r"расход\w*\s+учтен\w*|сумм\w*\s+уже\s+в\s+(?:план\w*|бюджет\w*)|"
+    r"(?:есть|имеется)(?=\s+\d[\d\s.,]*(?:тыс\w*|млн\w*|руб\w*)\s+"
+    r"в\s+(?:план\w*|бюджет\w*))|"
+    r"деньги\s+заложен\w*|"
+    r"(?:заложен\w*|заложил\w*|предусмотрен\w*|подтвержден\w*)"
+    r"(?=\s+\d[\d .]*(?:тыс|млн|руб|₽))|"
+    r"бюджет\w*\s+подтвержден\w*|бюджетн\w*\s+закуп\w*)\b"
+)
+
+BudgetStatus = Literal["budgeted", "unbudgeted", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -55,25 +119,48 @@ def normalize_regulation_text(value: str) -> str:
         .translate(_SPACE_TRANSLATION)
     )
     normalized = _DASHES.sub("-", normalized)
+    normalized = _normalize_budget_phrases(normalized)
+    normalized = _replace_word_numbers(normalized)
     normalized = _normalize_scaled_amounts(normalized)
     previous = None
     while previous != normalized:
         previous = normalized
         normalized = re.sub(r"(?<=\d)[ .](?=\d{3}(?:\D|$))", "", normalized)
     normalized = _normalize_duration_phrases(normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return re.sub(r"\s+([.,!?;:])", r"\1", normalized)
+
+
+def detect_budget_status(value: str) -> BudgetStatus | None:
+    normalized = _basic_normalize(value)
+    if _UNKNOWN_BUDGET.search(normalized):
+        return "unknown"
+    if _NEGATIVE_BUDGET.search(normalized):
+        return "unbudgeted"
+    if _POSITIVE_BUDGET.search(normalized):
+        return "budgeted"
+    return None
 
 
 def normalize_money_amount(value: str) -> Decimal | None:
     normalized = normalize_regulation_text(value)
     match = re.search(
         rf"(?<![\w])(-?\d+(?:[.,]\d+)?)\s*{_CURRENCY}"
-        r"(?=\s|$|[.,;:])|"
+        r"(?=\s|$|[.,;:!?»)])|"
         r"^\s*(-?\d+(?:[.,]\d+)?)\s*$",
         normalized,
     )
     if match is None:
-        return None
+        if not re.search(r"(?:тыс|млн|стоим|сумм|закуп|покуп|заяв)", value.casefold()):
+            return None
+        scaled = re.search(r"(?<!\d)(\d{4,})(?!\d)", normalized)
+        if scaled is None:
+            return None
+        match_value = scaled.group(1)
+        try:
+            return Decimal(match_value)
+        except InvalidOperation:
+            return None
     raw = next(item for item in match.groups() if item is not None)
     try:
         return Decimal(raw.replace(",", "."))
@@ -82,8 +169,7 @@ def normalize_money_amount(value: str) -> Decimal | None:
 
 
 def parse_duration_days(value: str) -> int | None:
-    normalized = _basic_normalize(value)
-    normalized = _replace_word_durations(normalized)
+    normalized = normalize_regulation_text(value)
     match = re.search(
         r"(?<!\w)(\d+)\s+(?:(?:календарн|рабоч)\w*\s+)?"
         r"(д(?:ень|ня|ней)|недел(?:я|и|ю|ь))\b",
@@ -167,35 +253,41 @@ def _normalize_scaled_amounts(value: str) -> str:
 
 
 def _normalize_duration_phrases(value: str) -> str:
-    normalized = _replace_word_durations(value)
-
     def replace_weeks(match: re.Match[str]) -> str:
         return f"{int(match.group(1)) * 7} дней"
 
-    return re.sub(
+    normalized = re.sub(
         r"(?<!\w)(\d+)\s+недел(?:я|и|ю|ь)\b",
         replace_weeks,
-        normalized,
+        value,
     )
+    normalized = re.sub(r"\bпослезавтра\b", "через 2 дня", normalized)
+    normalized = re.sub(r"\bзавтра\b", "через 1 день", normalized)
+    normalized = re.sub(r"\bсегодня\b", "через 0 дней", normalized)
+    return re.sub(r"\bчерез\s+месяц\b", "через 30 дней", normalized)
 
 
-def _replace_word_durations(value: str) -> str:
+def _replace_word_numbers(value: str) -> str:
     pattern = re.compile(
-        rf"\b({_WORD_NUMBER_PATTERN})(?:\s+({_WORD_NUMBER_PATTERN}))?\s+"
-        r"((?:(?:календарн|рабоч)\w*\s+)?"
-        r"(?:д(?:ень|ня|ней)|недел(?:я|и|ю|ь)))\b"
+        rf"\b({_WORD_NUMBER_PATTERN})(?:\s+({_ONES_PATTERN}))?\b"
     )
 
     def replace(match: re.Match[str]) -> str:
         number = _word_number(match.group(1), match.group(2))
-        if number is None:
-            return match.group(0)
-        unit = match.group(3)
-        if unit.startswith("недел"):
-            return f"{number * 7} дней"
-        return f"{number} {unit}"
+        return str(number) if number is not None else match.group(0)
 
     return pattern.sub(replace, value)
+
+
+def _normalize_budget_phrases(value: str) -> str:
+    normalized = _UNKNOWN_BUDGET.sub(" __budget_unknown__ ", value)
+    normalized = _NEGATIVE_BUDGET.sub(" __budget_unbudgeted__ ", normalized)
+    normalized = _POSITIVE_BUDGET.sub(" __budget_budgeted__ ", normalized)
+    return (
+        normalized.replace("__budget_unbudgeted__", "не предусмотрена бюджетом")
+        .replace("__budget_unknown__", "бюджетный статус неизвестен")
+        .replace("__budget_budgeted__", "предусмотрена бюджетом")
+    )
 
 
 def _word_number(first: str, second: str | None) -> int | None:

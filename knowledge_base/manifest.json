@@ -42,7 +42,7 @@
     "filename": "04_Классификатор_категорий_закупок.md",
     "owner": "Отдел закупок",
     "priority": 3,
-    "sha256": "1becbcf59c7efc14e253ba066c9fc1482ba09fe0d37d2ab2bddf3a958dbb0ecd",
+    "sha256": "2e7d5734dfc7b29727e4304293e8a2ea58ddc5938990d5bf0fe1d6bd7122793a",
     "status": "active",
     "title": "Классификатор категорий закупок",
     "version": "1.0"
@@ -150,7 +150,7 @@
     "filename": "13_Инструкция_по_работе_с_ассистентом.md",
     "owner": "Отдел закупок",
     "priority": 9,
-    "sha256": "fee7b3c099788bd9abcf7a14cd4b66a7211b39f8443c3140ab5b83629403fda3",
+    "sha256": "157b6b75d6fd5b9d8dd7c25d3640dbc457d461ba10174ad09f0e9cfc59ca7d0b",
     "status": "active",
     "title": "Инструкция по работе с ассистентом",
     "version": "1.0"

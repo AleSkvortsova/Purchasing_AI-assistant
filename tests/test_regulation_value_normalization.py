@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from app.rag.value_normalization import (
+    detect_budget_status,
     duration_below_threshold,
     normalize_money_amount,
     normalize_regulation_text,
@@ -10,6 +11,51 @@ from app.rag.value_normalization import (
     parse_money_ranges,
     value_in_range,
 )
+
+
+@pytest.mark.parametrize(
+    ("word", "number"),
+    [
+        ("один", 1),
+        ("два", 2),
+        ("три", 3),
+        ("четыре", 4),
+        ("пять", 5),
+        ("шесть", 6),
+        ("семь", 7),
+        ("восемь", 8),
+        ("девять", 9),
+        ("десять", 10),
+        ("одиннадцать", 11),
+        ("двенадцать", 12),
+        ("тринадцать", 13),
+        ("четырнадцать", 14),
+        ("пятнадцать", 15),
+        ("шестнадцать", 16),
+        ("семнадцать", 17),
+        ("восемнадцать", 18),
+        ("девятнадцать", 19),
+        ("двадцать", 20),
+    ],
+)
+def test_word_numbers_one_to_twenty_are_normalized(word: str, number: int) -> None:
+    assert normalize_regulation_text(f"{word} мониторов") == f"{number} мониторов"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("двадцать один монитор", "21 монитор"),
+        ("сорок пять паллет", "45 паллет"),
+        ("девяносто коробок", "90 коробок"),
+        ("девяносто пять тысяч рублей", "95000 рублей"),
+    ],
+)
+def test_tens_and_word_scaled_amounts_are_normalized(
+    value: str,
+    expected: str,
+) -> None:
+    assert normalize_regulation_text(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -79,3 +125,65 @@ def test_money_ranges_are_parsed_from_full_approval_matrix() -> None:
         )
         for item in ranges
     )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "предусмотрена бюджетом",
+        "забюджетировано",
+        "деньги в бюджете есть",
+        "расходы заложены в бюджет",
+        "бюджет подтверждён",
+    ],
+)
+def test_positive_budget_phrases_are_equivalent(value: str) -> None:
+    assert detect_budget_status(value) == "budgeted"
+    assert "предусмотрена бюджетом" in normalize_regulation_text(value)
+
+
+def test_negative_and_unknown_budget_phrases_are_not_made_positive() -> None:
+    assert detect_budget_status("не забюджетировано") == "unbudgeted"
+    assert detect_budget_status("денег в бюджете нет") == "unbudgeted"
+    assert detect_budget_status("бюджетный статус неизвестен") == "unknown"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "На закупку заложено 320 тысяч рублей",
+        "Предусмотрено 200 тысяч на покупку",
+        "Подтверждено 150 тысяч для закупки",
+        "На это заложили 400 тысяч рублей",
+        "Сумма уже в плане",
+        "Расходы учтены",
+    ],
+)
+def test_elliptical_positive_budget_phrases(value: str) -> None:
+    assert detect_budget_status(value) == "budgeted"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("На закупку не заложено 320 тысяч", "unbudgeted"),
+        ("Пока не подтверждено 150 тысяч", "unknown"),
+        ("Не знаю, предусмотрено ли 200 тысяч в плане", "unknown"),
+        ("Возможно, сумма есть в плане", "unknown"),
+    ],
+)
+def test_elliptical_budget_negation_and_uncertainty(
+    value: str,
+    expected: str,
+) -> None:
+    assert detect_budget_status(value) == expected
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["Заявка: ", "По этой покупке ", "Для согласования — "],
+)
+def test_budget_status_is_metamorphic_under_neutral_context(prefix: str) -> None:
+    assert detect_budget_status(f"{prefix}расходы учтены") == "budgeted"
+    assert detect_budget_status(f"{prefix}расходы не учтены") == "unbudgeted"
+    assert detect_budget_status(f"{prefix}возможно, расходы учтены") == "unknown"

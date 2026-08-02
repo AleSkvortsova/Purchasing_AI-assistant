@@ -35,6 +35,9 @@ def test_debug_cli_is_read_only_and_reports_all_retrieval_stages() -> None:
     assert "hybrid_search(" in source
     assert '"strict_query"' in source
     assert '"chunks_passed_to_answer_provider"' in source
+    assert '"relevance_decisions"' in source
+    assert '"source_kind"' in source
+    assert '"matched_intents"' in source
     assert '"below_threshold"' in source
     assert '"no_chunks"' in source
 
@@ -52,6 +55,7 @@ def test_answer_debug_cli_is_read_only_and_reports_validation_details() -> None:
     ):
         assert mutation not in source
     assert '"structured_output_summary"' in source
+    assert 'if args.show_structured_output' in source
     assert '"claim_concrete_values"' in source
     for forbidden in (
         "raw_structured_output",

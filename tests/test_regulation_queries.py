@@ -34,7 +34,7 @@ def test_urgency_morphology_selects_urgency_query(word: str) -> None:
     plan = build_regulation_query_plan(f"В каком случае заявка {word}?")
     assert plan.intent == "urgency"
     assert "срочность" in plan.broad_query
-    assert "нормативный" in plan.variants[-1]
+    assert any("нормативн" in query for query in plan.variants)
 
 
 def test_approval_query_adds_route_and_deadline_terminology() -> None:
@@ -46,7 +46,7 @@ def test_approval_query_adds_route_and_deadline_terminology() -> None:
     assert plan.intent == "approval"
     assert "матрица согласования" in plan.variants[1]
     assert "срок согласования" in plan.variants[1]
-    assert len(plan.variants) <= 3
+    assert len(plan.variants) <= 5
 
 
 def test_exact_status_phrase_is_preserved() -> None:
@@ -55,6 +55,53 @@ def test_exact_status_phrase_is_preserved() -> None:
     )
     assert "требует доработки" in plan.strict_query
     assert "требует доработки" in plan.variants[1]
+
+
+def test_transferred_status_phrase_is_used_in_targeted_query() -> None:
+    plan = build_regulation_query_plan(
+        "Что означает статус «Передана в отдел закупок»?"
+    )
+    assert plan.intents == ("status",)
+    assert "передана в отдел закупок" in plan.variants[1]
+
+
+def test_on_approval_status_uses_decision_and_transition_concepts() -> None:
+    plan = build_regulation_query_plan(
+        "У заявки статус «На согласовании». Мне нужно что-то делать?"
+    )
+
+    assert plan.intents == ("status",)
+    combined = " ".join(plan.variants)
+    assert "согласующие" in combined
+    assert "ожидание решения" in combined
+    assert "переход после согласования" in combined
+
+
+def test_multi_intent_question_keeps_urgency_and_form_fields() -> None:
+    plan = build_regulation_query_plan(
+        "Мероприятие состоится через десять дней. Как оформить заявку "
+        "и будет ли она срочной?"
+    )
+    assert plan.intents == ("urgency", "category_fields")
+    assert any("P2" in query for query in plan.variants)
+    assert any("обязательные поля" in query for query in plan.variants)
+
+
+def test_it_integration_question_targets_category_fields() -> None:
+    plan = build_regulation_query_plan(
+        "Хочу заказать разработку интеграции. Что обязательно написать?"
+    )
+    assert plan.intents == ("category_fields",)
+    assert any("S05" in query for query in plan.variants)
+
+
+def test_it_connection_wording_targets_category_fields() -> None:
+    plan = build_regulation_query_plan(
+        "Нужно подключить корпоративную систему к внешнему сервису. "
+        "Какие данные нужны для заявки?"
+    )
+    assert plan.intents == ("category_fields",)
+    assert any("S05" in query for query in plan.variants)
 
 
 def test_multi_query_fusion_is_position_based() -> None:

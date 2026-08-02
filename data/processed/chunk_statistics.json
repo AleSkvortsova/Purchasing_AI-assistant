@@ -1,9 +1,9 @@
 {
-  "average_chunks_per_document": 8.36,
-  "chunk_count": 117,
+  "average_chunks_per_document": 8.43,
+  "chunk_count": 118,
   "chunk_size_tokens": {
-    "max": 621,
-    "median": 112,
+    "max": 641,
+    "median": 112.0,
     "min": 55
   },
   "document_count": 14,
@@ -25,11 +25,11 @@
   "errors": 0,
   "five_largest_chunks": [
     {
-      "chunk_id": "bf8013c8-55bd-5768-ac9c-71857e28d63b",
+      "chunk_id": "6385be1e-fc47-54ea-9283-7480ebd1e9ba",
       "document_id": "kb-004",
       "document_title": "Классификатор категорий закупок",
       "section_path": "Классификатор категорий закупок",
-      "token_count_estimate": 621
+      "token_count_estimate": 641
     },
     {
       "chunk_id": "d2646fd7-406d-5e52-a17f-0fff56849f1f",

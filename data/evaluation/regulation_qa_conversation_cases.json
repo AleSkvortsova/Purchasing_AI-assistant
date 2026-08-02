@@ -1,0 +1,158 @@
+[
+  {
+    "case_id": "conversation-01-budget-yes",
+    "turns": [
+      {"role": "user", "text": "Закупка стоит 240 тысяч рублей. Кто её согласует?"},
+      {"expected_status": "clarification_required", "expected_missing_slots": ["budget_status"]},
+      {"role": "user", "text": "да"},
+      {"expected_status": "answered", "expected_slots": {"amount": "240000", "budget_status": "budgeted"}, "required_answer_terms": ["финансовый контролёр"]}
+    ]
+  },
+  {
+    "case_id": "conversation-02-budget-no",
+    "turns": [
+      {"role": "user", "text": "Заявка на 240 тысяч рублей. Кто должен одобрить?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "нет"},
+      {"expected_status": "answered", "expected_slots": {"budget_status": "unbudgeted"}, "required_answer_terms": ["генеральный директор"]}
+    ]
+  },
+  {
+    "case_id": "conversation-03-budget-word",
+    "turns": [
+      {"role": "user", "text": "Кто согласует заявку на 180 тысяч рублей?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "предусмотрена"},
+      {"expected_status": "answered", "expected_slots": {"amount": "180000", "budget_status": "budgeted"}}
+    ]
+  },
+  {
+    "case_id": "conversation-04-unknown-budget",
+    "turns": [
+      {"role": "user", "text": "Кто согласует закупку на 80 тысяч рублей?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "не знаю"},
+      {"expected_status": "clarification_required", "expected_slots": {"budget_status": "unknown"}, "expected_pending": false, "expected_reason_code": "unknown_budget_status", "required_answer_terms": ["нельзя однозначно определить маршрут", "ответственного за бюджет"]}
+    ]
+  },
+  {
+    "case_id": "conversation-05-compound-amount-budget",
+    "turns": [
+      {"role": "user", "text": "Я не уверена, можно ли понять маршрут согласования?"},
+      {"expected_status": "clarification_required", "expected_missing_slots": ["amount", "budget_status"]},
+      {"role": "user", "text": "180 тыс., предусмотрена"},
+      {"expected_status": "answered", "expected_intent": "approval_route", "expected_slots": {"amount": "180000", "budget_status": "budgeted"}, "expected_sources": ["kb-009"]}
+    ]
+  },
+  {
+    "case_id": "conversation-06-two-clarification-steps",
+    "turns": [
+      {"role": "user", "text": "Какой маршрут согласования?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "180 тысяч рублей"},
+      {"expected_status": "clarification_required", "expected_missing_slots": ["budget_status"]},
+      {"role": "user", "text": "закупка предусмотрена бюджетом"},
+      {"expected_status": "answered", "expected_slots": {"amount": "180000", "budget_status": "budgeted"}}
+    ]
+  },
+  {
+    "case_id": "conversation-07-goods-fields",
+    "turns": [
+      {"role": "user", "text": "Что мне указать?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "товар"},
+      {"expected_status": "answered", "expected_slots": {"purchase_type": "goods"}, "required_answer_terms": ["общие обязательные сведения"]}
+    ]
+  },
+  {
+    "case_id": "conversation-08-service-fields",
+    "turns": [
+      {"role": "user", "text": "Какие сведения нужно заполнить?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "услуга"},
+      {"expected_status": "answered", "expected_slots": {"purchase_type": "service"}}
+    ]
+  },
+  {
+    "case_id": "conversation-09-contextual-what-to-do",
+    "turns": [
+      {"role": "user", "text": "Что мне делать с этой заявкой?"},
+      {"expected_status": "clarification_required", "required_answer_terms": ["текущий статус заявки"]},
+      {"role": "user", "text": "На согласовании"},
+      {"expected_status": "answered", "expected_slots": {"status_name": "на согласовании"}, "expected_sources": ["kb-007"]}
+    ]
+  },
+  {
+    "case_id": "conversation-10-new-cancellation-question",
+    "turns": [
+      {"role": "user", "text": "Закупка на 240 тысяч. Кто согласует?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "Потребность отпала, заявку можно отменить?"},
+      {"expected_status": "answered", "required_answer_terms": ["Принята в работу"]}
+    ]
+  },
+  {
+    "case_id": "conversation-11-new-urgency-question",
+    "turns": [
+      {"role": "user", "text": "Кто согласует закупку на 240 тысяч?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "До выставки осталось пять дней. Что писать в заявке?"},
+      {"expected_status": "answered", "required_answer_terms": ["5 дней", "P2", "причина срочности"]}
+    ]
+  },
+  {
+    "case_id": "conversation-12-menu-reset",
+    "turns": [
+      {"role": "user", "text": "Кто согласует закупку на 240 тысяч?"},
+      {"expected_status": "clarification_required"},
+      {"role": "menu", "action": "instruction"},
+      {"expected_status": "idle", "expected_pending": false}
+    ]
+  },
+  {
+    "case_id": "conversation-13-expired-context",
+    "turns": [
+      {"role": "user", "text": "Кто согласует закупку на 240 тысяч?"},
+      {"expected_status": "clarification_required"},
+      {"role": "clock", "advance_minutes": 31},
+      {"role": "user", "text": "да"},
+      {"expected_status": "clarification_required", "expected_slots": {}, "forbidden_slots": ["amount"]}
+    ]
+  },
+  {
+    "case_id": "conversation-14-budget-full-phrase",
+    "turns": [
+      {"role": "user", "text": "Сумма 95 тысяч рублей. Какие согласования нужны?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "предусмотрена бюджетом"},
+      {"expected_status": "answered", "expected_slots": {"budget_status": "budgeted"}, "required_answer_terms": ["Руководитель подразделения"]}
+    ]
+  },
+  {
+    "case_id": "conversation-15-subject-after-type",
+    "turns": [
+      {"role": "user", "text": "Что потребуется указать для закупки?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "услуга"},
+      {"expected_status": "answered", "expected_slots": {"purchase_subject": "услуга", "purchase_type": "service"}}
+    ]
+  },
+  {
+    "case_id": "conversation-16-compound-unbudgeted",
+    "turns": [
+      {"role": "user", "text": "Я не уверена, можно ли понять маршрут согласования?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "450 тыс., не предусмотрена"},
+      {"expected_status": "answered", "expected_intent": "approval_route", "expected_slots": {"amount": "450000", "budget_status": "unbudgeted"}, "expected_sources": ["kb-009"], "required_answer_terms": ["генеральный директор"]}
+    ]
+  },
+  {
+    "case_id": "conversation-17-compound-budget-phrase",
+    "turns": [
+      {"role": "user", "text": "Я не уверена, можно ли понять маршрут согласования?"},
+      {"expected_status": "clarification_required"},
+      {"role": "user", "text": "сумма 550 тысяч, деньги в бюджете есть"},
+      {"expected_status": "answered", "expected_intent": "approval_route", "expected_slots": {"amount": "550000", "budget_status": "budgeted"}, "expected_sources": ["kb-009"], "required_answer_terms": ["руководитель закупок"]}
+    ]
+  }
+]

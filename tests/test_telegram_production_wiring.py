@@ -206,7 +206,10 @@ def test_regulation_mode_uses_production_wiring_without_intake_or_extra_clients(
         document_title="Правила согласования заявок",
         document_type="approval_rules",
         section_path="Матрица согласования",
-        content="Правило согласования.",
+        content=(
+            "Согласование определено матрицей.\n"
+            "| Бюджетная закупка до 100 000 руб. | Руководитель |"
+        ),
         priority=1,
         hybrid_score=0.03,
     )
@@ -299,12 +302,15 @@ def test_regulation_mode_uses_production_wiring_without_intake_or_extra_clients(
     dependencies = bot_main.build_dependencies(settings)
 
     asyncio.run(handle_text_message(FakeMessage(MENU_REGULATIONS, 900), dependencies))
-    question = FakeMessage("Кто согласует закупку?", 901)
+    question = FakeMessage(
+        "Кто согласует закупку на 100000 рублей, предусмотренную бюджетом?",
+        901,
+    )
     asyncio.run(handle_text_message(question, dependencies))
 
     assert len(retrieval_calls) == 3
     assert "матрица согласования" in retrieval_calls[1]
-    assert len(answer_provider.calls) == 1
+    assert answer_provider.calls == []
     assert intake_repository.storage.requests == {}
     assert "Источники:" in question.answers[0]
     assert constructor_clients == [supabase_client, openai_client, openai_client]
