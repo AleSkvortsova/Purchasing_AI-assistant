@@ -158,7 +158,11 @@ def answer_regulation_turn(
                 else "clarification_step_limit"
             )
             result = RegulationAnswer(
-                answer=_clarification_limit_answer(pending.primary_intent),
+                answer=_clarification_limit_answer(
+                    pending.primary_intent,
+                    missing,
+                    slots,
+                ),
                 status="clarification_required",
                 refusal_reason=reason,
                 diagnostics={
@@ -420,19 +424,58 @@ def _clarifying_question_fingerprint(question: str) -> str:
     return sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _clarification_limit_answer(primary_intent: RegulationQuestionIntent) -> str:
+def _clarification_limit_answer(
+    primary_intent: RegulationQuestionIntent,
+    missing: tuple[str, ...],
+    slots: RegulationKnownSlots,
+) -> str:
     if primary_intent == "approval_route":
+        if missing == ("budget_status",) and slots.amount is not None:
+            return (
+                "Я не смог понять бюджетный статус. Сумма закупки — "
+                f"{_format_amount_for_clarification(slots.amount)} рублей. "
+                "Уточните: закупка предусмотрена бюджетом, не предусмотрена "
+                "или бюджетный статус неизвестен."
+            )
+        if missing == ("amount",):
+            budget_description = {
+                "budgeted": "Закупка предусмотрена бюджетом.",
+                "unbudgeted": "Закупка не предусмотрена бюджетом.",
+                "unknown": "Бюджетный статус неизвестен.",
+            }.get(slots.budget_status, "")
+            return (
+                "Я не смог понять сумму закупки. "
+                f"{budget_description} Уточните сумму закупки в рублях."
+            ).replace("  ", " ")
         return (
-            "Без суммы и бюджетного статуса нельзя однозначно определить маршрут "
-            "согласования. Задайте новый вопрос, указав сумму закупки и предусмотрена "
-            "ли она бюджетом."
+            "Я не смог понять сумму закупки и бюджетный статус. Уточните сумму "
+            "закупки в рублях и укажите: закупка предусмотрена бюджетом, не "
+            "предусмотрена или бюджетный статус неизвестен."
         )
+    if missing == ("status_name",):
+        return (
+            "Я не смог понять текущий статус заявки. Уточните статус или опишите, "
+            "что произошло с заявкой."
+        )
+    if missing == ("purchase_subject",):
+        return "Я не смог понять предмет закупки. Уточните, что требуется закупить."
+    if missing == ("purchase_type",):
+        return "Я не смог понять тип закупки. Уточните: это товар или услуга."
     if primary_intent in {"required_fields", "ambiguous_followup"}:
         return (
-            "Без описания ситуации нельзя дать точный ответ. Задайте новый вопрос, "
-            "указав статус заявки или предмет закупки и что именно вы хотите узнать."
+            "Я не смог понять предмет и тип закупки. Уточните, что требуется "
+            "закупить и является ли это товаром или услугой."
         )
     return "Не удалось уточнить контекст. Задайте новый вопрос с нужными деталями."
+
+
+def _format_amount_for_clarification(amount: Decimal) -> str:
+    integral = int(amount)
+    if amount == integral and 1_000 <= integral < 1_000_000 and integral % 1_000 == 0:
+        return f"{integral // 1_000} тысяч"
+    if amount == integral:
+        return f"{integral:,}".replace(",", " ")
+    return format(amount.normalize(), "f").replace(".", ",")
 
 
 def _safe_slots(slots: RegulationKnownSlots) -> dict[str, str | int | None]:

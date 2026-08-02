@@ -344,16 +344,24 @@ def test_repeated_clarification_is_stopped(
     storage = InMemoryDialogModeStorage()
     adapter = _adapter(storage, qa_service)
     adapter.handle_menu(USER_ID, MENU_REGULATIONS)
-    adapter.handle_text(USER_ID, 1001, 34, "Кто согласует закупку?")
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        34,
+        "Кто согласует закупку на 190 тысяч?",
+    )
 
-    first_followup = adapter.handle_text(USER_ID, 1001, 35, "180 тысяч рублей")
-    assert "предусмотрена ли закупка бюджетом" in first_followup.text.casefold()
-    stopped = adapter.handle_text(USER_ID, 1001, 36, "пока не уточнила")
+    stopped = adapter.handle_text(USER_ID, 1001, 36, "какая-то короткая фраза")
     result = _result(storage, 36)
 
     assert result.status == "clarification_required"
     assert result.refusal_reason == "repeated_clarification"
-    assert "задайте новый вопрос" in stopped.text.casefold()
+    assert stopped.text == (
+        "Я не смог понять бюджетный статус. Сумма закупки — 190 тысяч рублей. "
+        "Уточните: закупка предусмотрена бюджетом, не предусмотрена или "
+        "бюджетный статус неизвестен."
+    )
+    assert result.diagnostics["conversation_slots"] == {"amount": "190000"}
     assert USER_ID not in storage.pending_regulation
 
 
@@ -376,7 +384,7 @@ def test_maximum_clarification_steps_returns_safe_explanation(
     result = _result(storage, 38)
 
     assert result.refusal_reason == "clarification_step_limit"
-    assert "задайте новый вопрос" in outcome.text.casefold()
+    assert "сумму закупки и бюджетный статус" in outcome.text.casefold()
     assert USER_ID not in storage.pending_regulation
 
 
