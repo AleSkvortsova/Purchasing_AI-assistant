@@ -22,6 +22,7 @@ from app.intake_persistence.exceptions import (
 from app.intake_persistence.mappers import IntakePersistenceMapper
 from app.intake_persistence.models import (
     IdempotencyRecord,
+    IntakeConversationState,
     MessageEnvelope,
     PersistenceMessageLog,
     PersistentIntakeStepResult,
@@ -51,6 +52,7 @@ class PersistentIntakeOrchestrator:
         incoming_message: MessageEnvelope | None = None,
         idempotency_key: str | None = None,
         *,
+        intake_conversation: IntakeConversationState | None = None,
         _allow_concurrent_retry: bool = True,
     ) -> PersistentIntakeStepResult:
         started = perf_counter()
@@ -105,6 +107,11 @@ class PersistentIntakeOrchestrator:
             request.id,
             intake_result,
             next_version,
+            intake_conversation=(
+                intake_conversation
+                if intake_conversation is not None
+                else (dialog.intake_conversation if dialog is not None else None)
+            ),
         )
         patch = self.mapper.draft_to_request_update(
             intake_result.draft,
@@ -189,6 +196,7 @@ class PersistentIntakeOrchestrator:
                     request.id,
                     incoming_message,
                     idempotency_key,
+                    intake_conversation=intake_conversation,
                     _allow_concurrent_retry=False,
                 )
             raise

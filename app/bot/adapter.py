@@ -4,7 +4,12 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
-from app.bot.categories import DeterministicCategoryClassifier
+from app.bot.categories import (
+    DeterministicCategoryClassifier,
+    classify_software_procurement_scope,
+    extract_procurement_items,
+    normalize_software_scope_reply,
+)
 from app.bot.dialog_modes import (
     DialogModePersistenceError,
     DialogModeRepository,
@@ -52,14 +57,18 @@ from app.extraction.intake import (
     TelegramExtractionMode,
     TelegramIntakeExtractionService,
 )
+from app.intake.field_registry import CATEGORY_NAMES
 from app.intake.models import IntakeFieldUpdate, IntakeStatus, UpdateSource
 from app.intake_persistence.exceptions import (
     ActiveDraftNotFoundError,
     ConcurrentIntakeUpdateError,
 )
 from app.intake_persistence.models import (
+    CategoryCandidateOption,
+    IntakeConversationState,
     MessageEnvelope,
     PersistentIntakeStepResult,
+    ProcurementItemCandidate,
 )
 from app.rag.answering import RegulationQuestionAnsweringService
 from app.rag.conversation import answer_regulation_turn
@@ -102,6 +111,11 @@ _KEEP_CONFLICT_REPLIES = {
     "прежнее значение",
 }
 
+_SOFTWARE_SCOPE_QUESTION = (
+    "Уточните, пожалуйста: лицензии уже приобретены и требуется только "
+    "установка, или лицензии также нужно закупить?"
+)
+
 
 class IntakeOrchestrator(Protocol):
     def get_active_session(self, user_id: UUID | str) -> PersistentIntakeStepResult: ...
@@ -113,6 +127,8 @@ class IntakeOrchestrator(Protocol):
         request_id: UUID | None = None,
         incoming_message: MessageEnvelope | None = None,
         idempotency_key: str | None = None,
+        *,
+        intake_conversation: IntakeConversationState | None = None,
     ) -> PersistentIntakeStepResult: ...
 
 
@@ -145,6 +161,7 @@ class TelegramIntakeOutcome:
     result: PersistentIntakeStepResult | None = None
     reply_markup: object | None = None
     replayed: bool = False
+    reason_code: str | None = None
 
 
 class TelegramIntakeAdapter:
@@ -280,6 +297,25 @@ class TelegramIntakeAdapter:
                 text,
             )
 
+        if (
+            active is not None
+            and active.dialog_state.intake_conversation.category_clarification_kind
+            == "software_acquisition_scope"
+        ):
+            return self._handle_software_scope_reply(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+            )
+
+        if (
+            active is not None
+            and active.dialog_state.intake_conversation.split_required
+        ):
+            return self._handle_split_selection(context, active, key, message_id, text)
+
         original_missing = active is None
         original_awaiting = (
             active.dialog_state.awaiting_field_code if active is not None else None
@@ -301,7 +337,37 @@ class TelegramIntakeAdapter:
                 active.dialog_state.next_question or active.intake_result.next_question
             )
             awaiting_field_code = active.dialog_state.awaiting_field_code
-        category_candidates = self._category_candidates(active)
+        if original_missing:
+            software_outcome = self._start_software_scope_resolution(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+            )
+            if software_outcome is not None:
+                return software_outcome
+            split_outcome = self._start_multi_category_split(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+            )
+            if split_outcome is not None:
+                return split_outcome
+        category_candidates = self._category_candidates(active, text)
+        if question is not None and question.field_code == "category_code":
+            category_outcome = self._handle_category_clarification_command(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+                category_candidates,
+            )
+            if category_outcome is not None:
+                return category_outcome
         use_structured = self._should_use_structured_extraction(
             original_missing=original_missing,
             active=active,
@@ -320,6 +386,14 @@ class TelegramIntakeAdapter:
                 category_candidates,
             )
         except TelegramParseError:
+            if question is not None and question.field_code == "category_code":
+                return self._category_parse_failure(
+                    context,
+                    active,
+                    key,
+                    message_id,
+                    category_candidates,
+                )
             if not use_structured:
                 raise
             update = IntakeFieldUpdate()
@@ -434,13 +508,82 @@ class TelegramIntakeAdapter:
                     "explicit_correction": True,
                 }
             )
+        if (
+            question is not None
+            and question.field_code == "category_code"
+            and update.values.get("category_code") in {"G05", "S05"}
+            and {"G05", "S05"}.issubset(category_candidates)
+        ):
+            category_values = dict(update.values)
+            category_values["procurement_type"] = (
+                "goods"
+                if category_values["category_code"] == "G05"
+                else "service"
+            )
+            update = update.model_copy(update={"values": category_values})
+            current_type = active.intake_result.draft.procurement_type
+            if current_type is not None and current_type != category_values[
+                "procurement_type"
+            ]:
+                update = update.model_copy(update={"explicit_correction": True})
+        intake_conversation = None
+        if "category_code" in update.values:
+            if (
+                active is not None
+                and not active.dialog_state.intake_conversation.is_empty
+            ):
+                intake_conversation = IntakeConversationState()
+        elif question is not None and question.field_code == "category_code":
+            intake_conversation = self._category_state(
+                active,
+                category_candidates,
+            )
+        elif update.values.get("procurement_type") in {"goods", "service"}:
+            classification = self._categories.classify(
+                text,
+                update.values.get("procurement_type"),
+            )
+            candidate_codes = classification.candidates[:4]
+            if candidate_codes:
+                intake_conversation = IntakeConversationState(
+                    category_candidates=[
+                        CategoryCandidateOption(
+                            code=code,
+                            label=CATEGORY_NAMES[code],
+                        )
+                        for code in candidate_codes
+                    ],
+                    category_step_id=f"category:{key}",
+                )
+        elif (
+            active is not None
+            and active.intake_result.draft.category_code is None
+            and active.dialog_state.intake_conversation.is_empty
+        ):
+            candidate_codes = self._derived_category_candidates(active, text)
+            if candidate_codes:
+                intake_conversation = IntakeConversationState(
+                    category_candidates=[
+                        CategoryCandidateOption(
+                            code=code,
+                            label=CATEGORY_NAMES[code],
+                        )
+                        for code in candidate_codes
+                    ],
+                    category_step_id=f"category:{key}",
+                )
+        step_kwargs = {
+            "request_id": active.request_id if active is not None else None,
+            "incoming_message": self._envelope(message_id, "telegram"),
+            "idempotency_key": key,
+        }
+        if intake_conversation is not None:
+            step_kwargs["intake_conversation"] = intake_conversation
         try:
             result = self._orchestrator.process_structured_step(
                 user_id,
                 update,
-                request_id=active.request_id if active is not None else None,
-                incoming_message=self._envelope(message_id, "telegram"),
-                idempotency_key=key,
+                **step_kwargs,
             )
         except ConcurrentIntakeUpdateError:
             refreshed = self._active_or_none(user_id)
@@ -1071,16 +1214,441 @@ class TelegramIntakeAdapter:
     def _category_candidates(
         self,
         active: PersistentIntakeStepResult | None,
+        latest_text: str | None = None,
     ) -> tuple[str, ...]:
         if active is None:
             return ()
+        stored = active.dialog_state.intake_conversation.category_candidates
+        if stored:
+            return tuple(option.code for option in stored)
         question = active.intake_result.next_question
         if question is None or question.field_code != "category_code":
             return ()
         classification = self._categories.classify_draft(active.intake_result.draft)
         if classification.kind == "exact" and classification.category_code:
             return (classification.category_code,)
+        if classification.candidates:
+            return classification.candidates[:4]
+        return self._derived_category_candidates(active, latest_text)
+
+    def _start_multi_category_split(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome | None:
+        items = extract_procurement_items(text)
+        if len({item.category_code for item in items}) < 2:
+            return None
+        candidates = [
+            ProcurementItemCandidate(
+                item_name=item.item_name,
+                procurement_type=item.procurement_type,
+                category_code=item.category_code,
+                category_label=CATEGORY_NAMES[item.category_code],
+                quantity=str(item.quantity) if item.quantity is not None else None,
+            )
+            for item in items
+        ]
+        extracted = self._parser.parse(text)
+        preserved = {
+            field: value
+            for field, value in extracted.values.items()
+            if field
+            not in {
+                "item_name",
+                "title",
+                "description",
+                "category_code",
+                "quantity",
+                "unit",
+            }
+        }
+        preserved.setdefault("procurement_type", "goods")
+        state = IntakeConversationState(
+            item_candidates=candidates,
+            split_required=True,
+            reason_code="multi_category_split_required",
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            IntakeFieldUpdate(values=preserved),
+            request_id=active.request_id if active is not None else None,
+            incoming_message=self._envelope(message_id, "telegram_split"),
+            idempotency_key=key,
+            intake_conversation=state,
+        )
+        categories = " и ".join(
+            _short_category_label(candidate.category_code) for candidate in candidates
+        )
+        subjects = " или ".join(candidate.item_name for candidate in candidates)
+        response = (
+            f"В описании указаны товары из разных категорий: {categories}. "
+            "Их нужно оформить отдельными заявками. "
+            f"С чего начнём: с {subjects}?"
+        )
+        outcome = TelegramIntakeOutcome(
+            response,
+            key,
+            IntakeFieldUpdate(values=preserved),
+            result,
+            reason_code="multi_category_split_required",
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _start_software_scope_resolution(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome | None:
+        scope = classify_software_procurement_scope(text)
+        if scope not in {"ambiguous", "mixed"}:
+            return None
+        extracted = self._parser.parse(text)
+        preserved = {
+            field: value
+            for field, value in extracted.values.items()
+            if field not in {"procurement_type", "category_code"}
+        }
+        if scope == "mixed":
+            preserved.pop("item_name", None)
+            preserved.setdefault("description", text)
+            state = _software_split_state(text)
+            response = _software_split_response()
+            reason_code = "multi_category_split_required"
+        else:
+            state = IntakeConversationState(
+                category_candidates=[
+                    CategoryCandidateOption(code="G05", label=CATEGORY_NAMES["G05"]),
+                    CategoryCandidateOption(code="S05", label=CATEGORY_NAMES["S05"]),
+                ],
+                category_step_id=f"software-scope:{key}",
+                category_question_fingerprint=sha256(
+                    _SOFTWARE_SCOPE_QUESTION.encode("utf-8")
+                ).hexdigest()[:16],
+                category_clarification_kind="software_acquisition_scope",
+                original_description=text,
+                reason_code="software_scope_clarification_required",
+            )
+            response = _SOFTWARE_SCOPE_QUESTION
+            reason_code = "software_scope_clarification_required"
+        update = IntakeFieldUpdate(values=preserved)
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=active.request_id if active is not None else None,
+            incoming_message=self._envelope(message_id, "telegram_software_scope"),
+            idempotency_key=key,
+            intake_conversation=state,
+        )
+        outcome = TelegramIntakeOutcome(
+            response,
+            key,
+            update,
+            result,
+            reason_code=reason_code,
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _handle_software_scope_reply(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome:
+        scope = normalize_software_scope_reply(text)
+        if scope == "mixed":
+            state = _software_split_state(
+                active.dialog_state.intake_conversation.original_description or ""
+            )
+            result = self._orchestrator.process_structured_step(
+                user.user_id,
+                IntakeFieldUpdate(),
+                request_id=active.request_id,
+                incoming_message=self._envelope(
+                    message_id, "telegram_software_scope_mixed"
+                ),
+                idempotency_key=key,
+                intake_conversation=state,
+            )
+            outcome = TelegramIntakeOutcome(
+                _software_split_response(),
+                key,
+                IntakeFieldUpdate(),
+                result,
+                reason_code="multi_category_split_required",
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+        if scope in {"product", "service"}:
+            values = {
+                "procurement_type": "goods" if scope == "product" else "service",
+                "category_code": "G05" if scope == "product" else "S05",
+            }
+            current_type = active.intake_result.draft.procurement_type
+            update = IntakeFieldUpdate(
+                values=values,
+                explicit_correction=(
+                    current_type is not None
+                    and current_type.value != values["procurement_type"]
+                ),
+            )
+            result = self._orchestrator.process_structured_step(
+                user.user_id,
+                update,
+                request_id=active.request_id,
+                incoming_message=self._envelope(
+                    message_id, "telegram_software_scope_resolved"
+                ),
+                idempotency_key=key,
+                intake_conversation=IntakeConversationState(),
+            )
+            outcome = TelegramIntakeOutcome(
+                format_intake_result(result, self._category_candidates(result)),
+                key,
+                update,
+                result,
+                card_actions(result),
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+        previous = active.dialog_state.intake_conversation
+        state = previous.model_copy(
+            update={
+                "category_clarification_repeats": (
+                    previous.category_clarification_repeats + 1
+                )
+            }
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            IntakeFieldUpdate(),
+            request_id=active.request_id,
+            incoming_message=self._envelope(
+                message_id, "telegram_software_scope_retry"
+            ),
+            idempotency_key=key,
+            intake_conversation=state,
+        )
+        outcome = TelegramIntakeOutcome(
+            _SOFTWARE_SCOPE_QUESTION,
+            key,
+            IntakeFieldUpdate(),
+            result,
+            reason_code="software_scope_clarification_required",
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _handle_split_selection(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome:
+        candidates = active.dialog_state.intake_conversation.item_candidates
+        selected = _selected_item(text, candidates)
+        if selected is None:
+            subjects = " или ".join(item.item_name for item in candidates)
+            outcome = TelegramIntakeOutcome(
+                f"Выберите, с чего начать: {subjects}.",
+                key,
+                IntakeFieldUpdate(),
+                active,
+                reason_code="multi_category_split_required",
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+        values: dict[str, object] = {
+            "procurement_type": selected.procurement_type,
+            "item_name": selected.item_name,
+            "category_code": selected.category_code,
+        }
+        if selected.quantity is not None:
+            values["quantity"] = selected.quantity
+        update = IntakeFieldUpdate(values=values)
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=active.request_id,
+            incoming_message=self._envelope(message_id, "telegram_split_selection"),
+            idempotency_key=key,
+            intake_conversation=IntakeConversationState(),
+        )
+        outcome = TelegramIntakeOutcome(
+            f"Начинаем с позиции «{selected.item_name}».\n\n"
+            + format_intake_result(result, self._category_candidates(result)),
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _handle_category_clarification_command(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        key: str,
+        message_id: int,
+        text: str,
+        candidates: tuple[str, ...],
+    ) -> TelegramIntakeOutcome | None:
+        if not _category_help_requested(text):
+            return None
+        if active is None:
+            return None
+        resolved = candidates or self._fallback_category_candidates(active, text)
+        reason = (
+            "category_candidates_missing"
+            if not candidates
+            else "repeated_category_clarification"
+        )
+        state = self._category_state(active, resolved, reason_code=reason)
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            IntakeFieldUpdate(),
+            request_id=active.request_id,
+            incoming_message=self._envelope(message_id, "telegram_category_help"),
+            idempotency_key=key,
+            intake_conversation=state,
+        )
+        outcome = TelegramIntakeOutcome(
+            _format_category_candidates(resolved),
+            key,
+            IntakeFieldUpdate(),
+            result,
+            reason_code=reason,
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _category_parse_failure(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        key: str,
+        message_id: int,
+        candidates: tuple[str, ...],
+    ) -> TelegramIntakeOutcome:
+        if active is None:
+            return TelegramIntakeOutcome(
+                "Опишите предмет закупки, чтобы подобрать категории.",
+                key,
+                IntakeFieldUpdate(),
+                reason_code="category_candidates_missing",
+            )
+        resolved = candidates or self._fallback_category_candidates(active)
+        previous = active.dialog_state.intake_conversation
+        repeats = previous.category_clarification_repeats + 1
+        reason = (
+            "repeated_category_clarification"
+            if candidates or repeats >= 2
+            else "category_candidates_missing"
+        )
+        state = self._category_state(
+            active,
+            resolved,
+            reason_code=reason,
+            repeats=repeats,
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            IntakeFieldUpdate(),
+            request_id=active.request_id,
+            incoming_message=self._envelope(message_id, "telegram_category_retry"),
+            idempotency_key=key,
+            intake_conversation=state,
+        )
+        suffix = (
+            "\n\nЕсли ни один вариант не подходит, вернитесь к описанию предмета."
+            if reason == "repeated_category_clarification"
+            else ""
+        )
+        outcome = TelegramIntakeOutcome(
+            _format_category_candidates(resolved) + suffix,
+            key,
+            IntakeFieldUpdate(),
+            result,
+            reason_code=reason,
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    def _fallback_category_candidates(
+        self,
+        active: PersistentIntakeStepResult,
+        latest_text: str | None = None,
+    ) -> tuple[str, ...]:
+        derived = self._derived_category_candidates(active, latest_text)
+        if derived:
+            return derived
+        if active.intake_result.draft.procurement_type == "service":
+            return ("S01", "S03", "S05", "S15")
+        return ("G01", "G02", "G03", "G04")
+
+    def _derived_category_candidates(
+        self,
+        active: PersistentIntakeStepResult,
+        latest_text: str | None,
+    ) -> tuple[str, ...]:
+        draft = active.intake_result.draft
+        source = " ".join(
+            value
+            for value in (
+                draft.item_name,
+                draft.description,
+                draft.specifications,
+                draft.desired_result,
+                latest_text,
+            )
+            if value
+        )
+        classification = self._categories.classify(source, draft.procurement_type)
+        if classification.kind == "exact" and classification.category_code:
+            return (classification.category_code,)
         return classification.candidates[:4]
+
+    @staticmethod
+    def _category_state(
+        active: PersistentIntakeStepResult,
+        candidates: tuple[str, ...],
+        *,
+        reason_code: str | None = None,
+        repeats: int | None = None,
+    ) -> IntakeConversationState:
+        previous = active.dialog_state.intake_conversation
+        question = active.intake_result.next_question
+        fingerprint = (
+            sha256(question.text.encode("utf-8")).hexdigest()[:16]
+            if question is not None
+            else None
+        )
+        return IntakeConversationState(
+            category_candidates=[
+                CategoryCandidateOption(code=code, label=CATEGORY_NAMES[code])
+                for code in candidates
+            ],
+            category_step_id=previous.category_step_id
+            or f"category:{active.request_version}",
+            category_question_fingerprint=fingerprint,
+            category_clarification_repeats=(
+                previous.category_clarification_repeats if repeats is None else repeats
+            ),
+            reason_code=reason_code,
+        )
 
     def _active_or_none(self, user_id: UUID) -> PersistentIntakeStepResult | None:
         try:
@@ -1132,6 +1700,108 @@ def _safe_scalar_values(update: IntakeFieldUpdate) -> dict[str, object]:
         for field_name, value in update.values.items()
         if field_name in _DEBUG_SCALAR_FIELDS
     }
+
+
+def _category_help_requested(text: str) -> bool:
+    normalized = " ".join(text.casefold().replace("ё", "е").split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "какие варианты",
+            "какие могут быть варианты",
+            "какие есть подходящие варианты",
+            "покажи варианты",
+            "покажи категории",
+            "дай список",
+            "перечисли категории",
+            "я не знаю номеров",
+            "назови варианты",
+            "что можно выбрать",
+            "не знаю категорию",
+        )
+    )
+
+
+def _format_category_candidates(candidates: tuple[str, ...]) -> str:
+    if not candidates:
+        return "Опишите предмет закупки подробнее, чтобы подобрать категории."
+    options = "\n".join(
+        f"{index}. {CATEGORY_NAMES[code]} ({code})"
+        for index, code in enumerate(candidates[:4], start=1)
+    )
+    clarification = ""
+    if {"G05", "S05"}.issubset(candidates):
+        clarification = (
+            "Уточните, что требуется: приобрести готовую лицензию, "
+            "настроить готовое ПО или разработать/доработать систему.\n\n"
+        )
+    return (
+        f"{clarification}Подходящие категории:\n{options}"
+        "\n\nНапишите номер или название категории."
+    )
+
+
+def _selected_item(
+    text: str,
+    candidates: list[ProcurementItemCandidate],
+) -> ProcurementItemCandidate | None:
+    normalized = " ".join(text.casefold().replace("ё", "е").split())
+    matches = [
+        item
+        for item in candidates
+        if item.item_name in normalized
+        or _short_category_label(item.category_code) in normalized
+        or item.category_label.casefold() in normalized
+        or (item.category_code == "G05" and "лиценз" in normalized)
+        or (
+            item.category_code == "S05"
+            and any(term in normalized for term in ("установ", "настрой"))
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _short_category_label(code: str) -> str:
+    return {
+        "G02": "мебель",
+        "G03": "компьютерная техника",
+        "G04": "IT-периферия",
+    }.get(code, CATEGORY_NAMES[code].casefold())
+
+
+def _software_split_state(original_description: str) -> IntakeConversationState:
+    return IntakeConversationState(
+        item_candidates=[
+            ProcurementItemCandidate(
+                item_name="лицензии на ПО",
+                procurement_type="goods",
+                category_code="G05",
+                category_label=CATEGORY_NAMES["G05"],
+            ),
+            ProcurementItemCandidate(
+                item_name="установка и настройка ПО",
+                procurement_type="service",
+                category_code="S05",
+                category_label=CATEGORY_NAMES["S05"],
+            ),
+        ],
+        category_candidates=[
+            CategoryCandidateOption(code="G05", label=CATEGORY_NAMES["G05"]),
+            CategoryCandidateOption(code="S05", label=CATEGORY_NAMES["S05"]),
+        ],
+        split_required=True,
+        original_description=original_description,
+        reason_code="multi_category_split_required",
+    )
+
+
+def _software_split_response() -> str:
+    return (
+        "Приобретение лицензий относится к категории «ПО и лицензии» (G05), "
+        "а установка и настройка — к категории «IT-разработка и поддержка» "
+        "(S05). Потребности разных категорий нужно оформить отдельными "
+        "заявками. С чего начнём: с приобретения лицензий или с установки?"
+    )
 
 
 def _user_context(user: ResolvedTelegramUser | UUID) -> ResolvedTelegramUser:

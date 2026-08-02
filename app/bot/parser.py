@@ -140,12 +140,17 @@ class DeterministicIntakeParser:
         code_match = _CATEGORY_CODE.fullmatch(normalized)
         if code_match is not None:
             code = code_match.group(1).upper()
-            if code in CATEGORY_NAMES:
+            if code in CATEGORY_NAMES and (not candidates or code in candidates):
                 return code
             raise ValueError("Unknown category code")
         by_name = self._categories.category_by_name(normalized)
-        if by_name is not None:
+        if by_name is not None and (not candidates or by_name in candidates):
             return by_name
+        if candidates:
+            matched = self._categories.match_candidate_name(normalized, candidates)
+            if matched is not None:
+                return matched
+            raise ValueError("Category is not among persisted candidates")
         classification = self._categories.classify(normalized)
         if classification.kind == "exact" and classification.category_code:
             return classification.category_code

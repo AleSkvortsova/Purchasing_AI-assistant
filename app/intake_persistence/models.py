@@ -7,6 +7,53 @@ from pydantic import BaseModel, Field
 from app.intake.models import IntakeStatus, IntakeStepResult, NextQuestion
 
 
+class ProcurementItemCandidate(BaseModel):
+    item_name: str
+    procurement_type: Literal["goods", "service"]
+    category_code: str
+    category_label: str
+    quantity: str | None = None
+
+
+class CategoryCandidateOption(BaseModel):
+    code: str
+    label: str
+
+
+class IntakeConversationState(BaseModel):
+    item_candidates: list[ProcurementItemCandidate] = Field(default_factory=list)
+    category_candidates: list[CategoryCandidateOption] = Field(default_factory=list)
+    category_step_id: str | None = None
+    split_required: bool = False
+    category_question_fingerprint: str | None = None
+    category_clarification_repeats: int = Field(default=0, ge=0)
+    category_clarification_kind: Literal["software_acquisition_scope"] | None = None
+    original_description: str | None = None
+    reason_code: (
+        Literal[
+            "category_candidates_missing",
+            "repeated_category_clarification",
+        "multi_category_split_required",
+        "software_scope_clarification_required",
+        ]
+        | None
+    ) = None
+
+    @property
+    def is_empty(self) -> bool:
+        return not (
+            self.item_candidates
+            or self.category_candidates
+            or self.split_required
+            or self.category_step_id
+            or self.category_question_fingerprint
+            or self.category_clarification_repeats
+            or self.category_clarification_kind
+            or self.original_description
+            or self.reason_code
+        )
+
+
 class MessageEnvelope(BaseModel):
     message_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -22,6 +69,9 @@ class PersistentDialogState(BaseModel):
     state_version: int = Field(ge=1)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
+    intake_conversation: IntakeConversationState = Field(
+        default_factory=IntakeConversationState
+    )
 
 
 class PersistenceMessageLog(BaseModel):

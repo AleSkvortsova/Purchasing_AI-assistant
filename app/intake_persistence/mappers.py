@@ -14,7 +14,10 @@ from app.intake_persistence.exceptions import (
     IntakePersistenceMappingError,
     UnsupportedIntakeSchemaVersionError,
 )
-from app.intake_persistence.models import PersistentDialogState
+from app.intake_persistence.models import (
+    IntakeConversationState,
+    PersistentDialogState,
+)
 from app.schemas.common import RequestType
 from app.schemas.request import RequestRead, RequestUpdate
 
@@ -155,6 +158,7 @@ class IntakePersistenceMapper:
         request_id,
         result: IntakeStepResult,
         state_version: int,
+        intake_conversation: IntakeConversationState | None = None,
     ) -> PersistentDialogState:
         question = result.next_question
         return PersistentDialogState(
@@ -166,6 +170,7 @@ class IntakePersistenceMapper:
             related_conflict_id=(question.related_conflict_id if question else None),
             state_version=state_version,
             metadata={"request_status": "draft"},
+            intake_conversation=intake_conversation or {},
         )
 
     @staticmethod
