@@ -109,4 +109,36 @@ class IntakeFieldValidator:
                 errors["category_code"] = (
                     "Категория не соответствует типу закупки"
                 )
+            elif "category_code" in draft.field_states:
+                from app.bot.categories import DeterministicCategoryClassifier
+
+                classification = DeterministicCategoryClassifier().classify_draft(
+                    draft
+                )
+                source = " ".join(
+                    value
+                    for value in (
+                        draft.item_name,
+                        draft.description,
+                        draft.specifications,
+                    )
+                    if value
+                ).casefold()
+                accepted_alternative = (
+                    "монитор" in source
+                    and {draft.category_code, classification.category_code}
+                    <= {"G03", "G04"}
+                )
+                incompatible = (
+                    classification.kind == "exact"
+                    and classification.category_code != draft.category_code
+                    and not accepted_alternative
+                ) or (
+                    bool(classification.candidates)
+                    and draft.category_code not in classification.candidates
+                )
+                if incompatible:
+                    errors["category_code"] = (
+                        "Категория явно не соответствует предмету закупки"
+                    )
         return errors

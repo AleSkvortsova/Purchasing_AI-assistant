@@ -285,3 +285,49 @@ def test_grounded_payload_schema_is_closed_and_all_fields_are_required() -> None
     claim_schema = schema["$defs"]["GroundedClaim"]
     assert claim_schema["additionalProperties"] is False
     assert set(claim_schema["properties"]) == set(claim_schema["required"])
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Подскажи рецепт борща на четыре порции.",
+        "Какая погода завтра в Москве?",
+        "Напиши функцию на Python для сортировки списка.",
+    ],
+)
+def test_outside_domain_is_rejected_before_retrieval(question: str) -> None:
+    retrieval = FakeRetrieval([CHUNK_A])
+    provider = FakeGroundedAnswerProvider()
+
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(question)
+
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "outside_domain"
+    assert result.sources == []
+    assert result.diagnostics["retrieval_status"] == "not_called"
+    assert retrieval.calls == []
+    assert provider.calls == []
+
+
+def test_secondary_intent_claim_cannot_replace_primary_answer() -> None:
+    fields = _chunk(
+        "33333333-3333-4333-8333-333333333333",
+        "kb-005",
+        "Матрица полей",
+        content="Для заявки обязательно указать описание предмета закупки.",
+        document_type="field_matrix",
+    )
+    retrieval = FakeRetrieval([fields])
+    provider = FakeGroundedAnswerProvider(
+        _payload(
+            "Для заявки обязательно указать описание предмета закупки.",
+            [str(fields.chunk_id)],
+        )
+    )
+
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Закупка на 90000 рублей предусмотрена бюджетом. Кто согласует и что указать?"
+    )
+
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "unsupported_answer"

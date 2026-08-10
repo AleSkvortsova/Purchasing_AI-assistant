@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -14,6 +14,7 @@ from app.bot.formatters import (
 )
 from app.bot.normalization import (
     NaturalDateParser,
+    find_amount_expression,
     normalize_unit,
     parse_amount,
     parse_amount_expression,
@@ -33,6 +34,7 @@ from app.intake.models import (
     UpdateSource,
 )
 from app.intake.service import RequestIntakeService
+from app.intake.validators import IntakeFieldValidator
 from app.intake_persistence.models import (
     PersistentDialogState,
     PersistentIntakeStepResult,
@@ -553,6 +555,39 @@ def test_piece_units_are_normalized(raw: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
+        ("пачка", "пач."),
+        ("пачки", "пач."),
+        ("пачек", "пач."),
+        ("упаковка", "упак."),
+        ("упаковки", "упак."),
+        ("упаковок", "упак."),
+        ("коробка", "коробка"),
+        ("коробки", "коробка"),
+        ("коробок", "коробка"),
+        ("комплект", "комплект"),
+        ("комплекта", "комплект"),
+        ("комплектов", "комплект"),
+    ],
+)
+def test_packaging_unit_morphology_uses_one_canonical_contract(
+    raw: str,
+    expected: str,
+) -> None:
+    assert normalize_unit(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "ordinary_noun",
+    ["лампочек", "тарелок", "банок", "клавиатур", "принтер"],
+)
+def test_ordinary_countable_nouns_are_not_units(ordinary_noun: str) -> None:
+    with pytest.raises(ValueError, match="Unsupported unit"):
+        normalize_unit(ordinary_noun)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
         ("2026-08-20", date(2026, 8, 20)),
         ("20.08.2026", date(2026, 8, 20)),
         ("20 августа", date(2026, 8, 20)),
@@ -647,6 +682,35 @@ def test_relative_date_month_year_and_leap_boundaries(
     assert NaturalDateParser(today_provider=lambda: base).parse(raw) == expected
 
 
+@pytest.mark.parametrize("offset_days", [0, 1, 30])
+def test_intake_date_validation_accepts_today_and_future_deterministically(
+    offset_days: int,
+    freeze_intake_today,
+) -> None:
+    base = date(2026, 12, 31)
+    freeze_intake_today(base)
+
+    assert IntakeFieldValidator().normalize(
+        "desired_delivery_date",
+        base + timedelta(days=offset_days),
+    ) == base + timedelta(days=offset_days)
+
+
+@pytest.mark.parametrize("offset_days", [-1, -30])
+def test_intake_date_validation_rejects_past_deterministically(
+    offset_days: int,
+    freeze_intake_today,
+) -> None:
+    base = date(2027, 1, 1)
+    freeze_intake_today(base)
+
+    with pytest.raises(ValueError, match="не может быть в прошлом"):
+        IntakeFieldValidator().normalize(
+            "desired_delivery_date",
+            base + timedelta(days=offset_days),
+        )
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -709,7 +773,8 @@ def test_unsupported_relative_date_is_rejected() -> None:
         parser.parse("через пару недель")
 
 
-def test_date_update_serializes_to_iso() -> None:
+def test_date_update_serializes_to_iso(freeze_intake_today) -> None:
+    freeze_intake_today(date(2026, 7, 28))
     parser = DeterministicIntakeParser(
         date_parser=NaturalDateParser(today_provider=lambda: date(2026, 7, 28))
     )
@@ -721,7 +786,10 @@ def test_date_update_serializes_to_iso() -> None:
     )
 
 
-def test_long_answer_to_date_question_extracts_relative_deadline_span() -> None:
+def test_long_answer_to_date_question_extracts_relative_deadline_span(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(date(2026, 7, 28))
     parser = DeterministicIntakeParser(
         date_parser=NaturalDateParser(today_provider=lambda: date(2026, 7, 28))
     )
@@ -823,6 +891,127 @@ def test_amount_expression_preserves_modifier_period_and_full_currency_word(
     assert parsed.amount == amount
     assert parsed.modifier == modifier
     assert parsed.billing_period == period
+
+
+@pytest.mark.parametrize(
+    ("raw", "modifier"),
+    [
+        ("120000", "exact"),
+        ("120 000", "exact"),
+        ("120 000 руб", "exact"),
+        ("120 000 рублей", "exact"),
+        ("120 000 рублей.", "exact"),
+        ("120\u00a0000 рублей.", "exact"),
+        ("До 120 000 рублей", "maximum"),
+        ("До 120 000 рублей.", "maximum"),
+        ("не более 120 тыс руб", "maximum"),
+        ("максимум 120 000 рублей", "maximum"),
+        ("около 120 000 рублей", "approximate"),
+        ("примерно 120 тыс.", "approximate"),
+        ("ориентировочно 120 тыс. руб.", "approximate"),
+    ],
+)
+def test_initial_and_clarification_amount_paths_share_contract(
+    raw: str,
+    modifier: str,
+) -> None:
+    clarification = parse_amount_expression(raw)
+    initial = find_amount_expression(f"Нужно купить бумагу, сумма {raw}")
+
+    assert initial is not None
+    assert initial.parsed == clarification
+    assert clarification.amount == Decimal("120000")
+    assert clarification.modifier == modifier
+
+
+@pytest.mark.parametrize("punctuation", [".", ",", "!", "?"])
+def test_amount_terminal_punctuation_is_semantically_ignored(
+    punctuation: str,
+) -> None:
+    raw = f"До 120 000 рублей{punctuation}"
+
+    clarification = parse_amount_expression(raw)
+    initial = find_amount_expression(f"Сумма {raw}")
+
+    assert initial is not None
+    assert initial.parsed == clarification
+    assert clarification.amount == Decimal("120000")
+    assert clarification.modifier == "maximum"
+
+
+def test_amount_span_does_not_capture_quantity_or_date() -> None:
+    extracted = find_amount_expression(
+        "Нужно купить 5 упаковок бумаги к 20 августа, "
+        "сумма до 120 000 рублей."
+    )
+
+    assert extracted is not None
+    assert extracted.parsed.amount == Decimal("120000")
+    assert extracted.parsed.modifier == "maximum"
+
+
+def test_non_money_range_does_not_hide_a_later_explicit_amount() -> None:
+    extracted = find_amount_expression(
+        "Нужно от 100 до 120 листов бумаги, сумма 50 000 рублей."
+    )
+
+    assert extracted is not None
+    assert extracted.parsed.amount == Decimal("50000")
+
+
+def test_amount_range_is_rejected_consistently_by_both_paths() -> None:
+    value = "от 100 до 120 тыс. рублей"
+    errors: list[ValueError] = []
+
+    for parse in (
+        lambda: parse_amount_expression(value),
+        lambda: find_amount_expression(f"Сумма {value}"),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            parse()
+        errors.append(exc_info.value)
+
+    assert type(errors[0]) is type(errors[1])
+
+
+def test_amount_range_is_a_controlled_unsupported_intake_value() -> None:
+    value = "от 100 до 120 тыс. рублей"
+    parser = DeterministicIntakeParser()
+
+    initial = parser.parse(f"Нужно купить бумагу, сумма {value}")
+    assert "amount" not in initial.values
+
+    with pytest.raises(TelegramParseError, match="Не удалось определить сумму"):
+        parser.parse(value, _question("amount", "decimal"))
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("пачка", "пач."),
+        ("пачки", "пач."),
+        ("пачек", "пач."),
+        ("упаковка", "упак."),
+        ("упаковки", "упак."),
+        ("упаковок", "упак."),
+        ("коробка", "коробка"),
+        ("коробки", "коробка"),
+        ("коробок", "коробка"),
+        ("комплект", "комплект"),
+        ("комплекта", "комплект"),
+        ("комплектов", "комплект"),
+    ],
+)
+def test_deterministic_extraction_uses_canonical_packaging_units(
+    raw: str,
+    expected: str,
+) -> None:
+    values = DeterministicEntityExtractor().extract(
+        f"Купить 50 {raw} бумаги"
+    ).values
+
+    assert values["quantity"] == Decimal("50")
+    assert values["unit"] == expected
 
 
 @pytest.mark.parametrize(

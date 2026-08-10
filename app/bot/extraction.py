@@ -6,8 +6,10 @@ from app.bot.categories import DeterministicCategoryClassifier
 from app.bot.normalization import (
     CARDINAL_WORD_PATTERN,
     NaturalDateParser,
+    UnsupportedAmountRangeError,
     amount_evidence,
     find_amount_expression,
+    find_unit_prefix,
     normalize_budget_status,
     normalize_unit,
     parse_amount_expression,
@@ -29,14 +31,6 @@ _NUMBER_PATTERN = (
 )
 _COUNT_PREFIX = re.compile(
     rf"^(?P<quantity>{_NUMBER_PATTERN})\s+",
-    re.IGNORECASE,
-)
-_EXPLICIT_UNIT = re.compile(
-    r"^(?P<unit>шт\.?|штук(?:а|и)?|единиц(?:а|ы)?|"
-    r"кг|килограмм(?:а|ов)?|л\.?|литр(?:а|ов)?|"
-    r"м|метр(?:а|ов)?|м²|м2|кв\.\s*м|"
-    r"упак\.?|упаков(?:ка|ки|ок)|короб(?:ка|ки|ок)|"
-    r"комплект(?:а|ов)?|час(?:а|ов)?)\b\.?\s*",
     re.IGNORECASE,
 )
 _MULTIPLE_ITEM = re.compile(
@@ -128,7 +122,10 @@ class DeterministicEntityExtractor:
         for span in sorted(correction_spans, reverse=True):
             working = _remove_span(working, span)
         working = _ACTION.sub("", _LEADING.sub("", working)).strip()
-        amount_match = find_amount_expression(working)
+        try:
+            amount_match = find_amount_expression(working)
+        except UnsupportedAmountRangeError:
+            amount_match = None
         if amount_match is not None:
             values["amount"] = amount_match.parsed.amount
             evidence["amount"] = amount_evidence(amount_match.parsed)
@@ -291,14 +288,14 @@ def _extract_goods_count(
         except Exception:
             return value, {}, {}
     remainder = value[match.end() :]
-    unit_match = _EXPLICIT_UNIT.match(remainder)
+    unit_match = find_unit_prefix(remainder)
     if _has_independent_second_item(remainder):
         return value, {}, {}
     evidence = {"quantity": raw_quantity}
     if unit_match is not None:
-        raw_unit = unit_match.group("unit")
-        unit = normalize_unit(raw_unit)
-        item_remainder = remainder[unit_match.end() :].strip()
+        raw_unit = unit_match.raw
+        unit = unit_match.unit
+        item_remainder = remainder[unit_match.span[1] :].strip()
         if item_remainder:
             remainder = item_remainder
         evidence["unit"] = raw_unit

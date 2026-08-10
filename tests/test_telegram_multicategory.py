@@ -5,7 +5,13 @@ import pytest
 
 from app.bot.adapter import TelegramIntakeAdapter
 from app.bot.categories import DeterministicCategoryClassifier
-from app.intake.models import IntakeFieldUpdate
+from app.bot.normalization import NaturalDateParser
+from app.bot.parser import DeterministicIntakeParser
+from app.intake.models import IntakeFieldUpdate, IntakeStatus
+from app.intake_persistence.models import (
+    CategoryCandidateOption,
+    IntakeConversationState,
+)
 from app.intake_persistence.repositories import (
     InMemoryIntakePersistenceRepository,
     InMemoryIntakeStorage,
@@ -13,11 +19,15 @@ from app.intake_persistence.repositories import (
 from app.intake_persistence.service import PersistentIntakeOrchestrator
 
 USER_ID = UUID("77777777-7777-4777-8777-777777777777")
+REFERENCE_DATE = date(2026, 7, 29)
 
 
 def _adapter(storage: InMemoryIntakeStorage) -> TelegramIntakeAdapter:
     return TelegramIntakeAdapter(
-        PersistentIntakeOrchestrator(InMemoryIntakePersistenceRepository(storage))
+        PersistentIntakeOrchestrator(InMemoryIntakePersistenceRepository(storage)),
+        parser=DeterministicIntakeParser(
+            date_parser=NaturalDateParser(today_provider=lambda: REFERENCE_DATE)
+        ),
     )
 
 
@@ -64,7 +74,9 @@ def test_natural_category_aliases(
 )
 def test_multi_category_description_requires_split_and_narrows_after_reload(
     selection: str,
+    freeze_intake_today,
 ) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     storage = InMemoryIntakeStorage()
 
     split = _adapter(storage).handle_text(
@@ -192,3 +204,165 @@ def test_two_items_of_same_category_do_not_trigger_split() -> None:
     assert outcome.reason_code != "multi_category_split_required"
     assert outcome.result is not None
     assert outcome.result.intake_result.draft.category_code == "G02"
+
+
+def test_rehearsal_goods_plus_service_requires_split_before_scalar_draft(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(REFERENCE_DATE)
+    storage = InMemoryIntakeStorage()
+
+    outcome = _adapter(storage).handle_text(
+        USER_ID,
+        1001,
+        200,
+        "Нужно закупить 20 светодиодных потолочных светильников для "
+        "производственного помещения и выполнить их монтаж вместо старых "
+        "светильников до 5 сентября. Работы и поставка нужны на площадке "
+        "по адресу улица Салова, 56.",
+    )
+
+    assert outcome.reason_code == "multi_category_split_required"
+    assert outcome.result is not None
+    assert "две отдельные потребности" in outcome.text
+    state = outcome.result.dialog_state.intake_conversation
+    assert [item.procurement_type for item in state.item_candidates] == [
+        "goods",
+        "service",
+    ]
+    assert "светильник" in state.item_candidates[0].item_name
+    assert "монтаж" in state.item_candidates[1].item_name
+    draft = outcome.result.intake_result.draft
+    assert draft.item_name is None
+    assert draft.category_code is None
+    assert outcome.result.intake_result.request_card is None
+    assert outcome.result.intake_result.status != IntakeStatus.READY_FOR_CONFIRMATION
+
+    selected = _adapter(storage).handle_text(
+        USER_ID,
+        1001,
+        201,
+        "Начнём с монтажа",
+    )
+    assert selected.result is not None
+    selected_draft = selected.result.intake_result.draft
+    assert selected_draft.procurement_type == "service"
+    assert selected_draft.category_code == "S01"
+    assert "монтаж" in (selected_draft.item_name or "")
+    assert selected_draft.quantity is None
+    assert selected_draft.desired_delivery_date == date(2026, 9, 5)
+    assert "Салова" in (selected_draft.delivery_location or "")
+    reloaded = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage)
+    ).get_active_session(USER_ID)
+    assert reloaded.intake_result.draft.quantity is None
+    assert reloaded.intake_result.draft.procurement_type == "service"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Купить кондиционер и установить его в переговорной",
+        "Закупить напольное покрытие и выполнить его укладку",
+        "Поставить стеллажи и собрать их на складе",
+        "Купить оборудование и выполнить монтаж",
+        "Закупить новые картриджи и заправить используемые картриджи",
+    ],
+)
+def test_goods_plus_service_paraphrases_require_split(text: str) -> None:
+    outcome = _adapter(InMemoryIntakeStorage()).handle_text(
+        USER_ID,
+        1001,
+        210,
+        text,
+    )
+
+    assert outcome.reason_code == "multi_category_split_required"
+    assert outcome.result is not None
+    assert {
+        item.procurement_type
+        for item in outcome.result.dialog_state.intake_conversation.item_candidates
+    } == {"goods", "service"}
+    assert outcome.result.intake_result.draft.category_code is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Сборка 3 шкафов и 2 столов",
+        "Ремонт 5 офисных кресел",
+        "Перевозка 12 паллет",
+        "Уборка склада с мойкой окон",
+        "Нужно купить бумагу с доставкой товара поставщиком",
+        "Нужно купить два офисных стола и три тумбы",
+    ],
+)
+def test_single_need_phrases_do_not_trigger_goods_service_split(text: str) -> None:
+    outcome = _adapter(InMemoryIntakeStorage()).handle_text(
+        USER_ID,
+        1001,
+        220,
+        text,
+    )
+
+    state = (
+        outcome.result.dialog_state.intake_conversation
+        if outcome.result is not None
+        else None
+    )
+    types = (
+        {item.procurement_type for item in state.item_candidates}
+        if state
+        else set()
+    )
+    assert types != {"goods", "service"}
+
+
+@pytest.mark.parametrize(
+    ("selected_type", "stale_code", "forbidden_prefix"),
+    [("goods", "S01", "S"), ("service", "G03", "G")],
+)
+def test_category_candidates_are_invalidated_after_type_change_and_reload(
+    selected_type: str,
+    stale_code: str,
+    forbidden_prefix: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    orchestrator = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage)
+    )
+    seeded = orchestrator.process_structured_step(
+        USER_ID,
+        IntakeFieldUpdate(values={"item_name": "неопределённая потребность"}),
+        intake_conversation=IntakeConversationState(
+            category_candidates=[
+                CategoryCandidateOption(
+                    code=stale_code,
+                    label="устаревший кандидат",
+                )
+            ],
+            category_step_id="stale-category-step",
+        ),
+    )
+    assert seeded.intake_result.next_question is not None
+    assert seeded.intake_result.next_question.field_code == "procurement_type"
+
+    _adapter(storage).handle_text(
+        USER_ID,
+        1001,
+        230,
+        "товар" if selected_type == "goods" else "услуга",
+    )
+    reloaded = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage)
+    ).get_active_session(USER_ID)
+
+    codes = [
+        option.code
+        for option in reloaded.dialog_state.intake_conversation.category_candidates
+    ]
+    assert all(not code.startswith(forbidden_prefix) for code in codes)
+
+    selected = _adapter(storage).handle_text(USER_ID, 1001, 231, stale_code)
+    assert selected.result is not None
+    assert selected.result.intake_result.draft.category_code != stale_code

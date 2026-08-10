@@ -57,6 +57,11 @@ _UNIT_ALIASES = {
     "упаковка": "упак.",
     "упаковки": "упак.",
     "упаковок": "упак.",
+    "пач": "пач.",
+    "пач.": "пач.",
+    "пачка": "пач.",
+    "пачки": "пач.",
+    "пачек": "пач.",
     "коробка": "коробка",
     "коробки": "коробка",
     "коробок": "коробка",
@@ -76,6 +81,21 @@ _UNIT_ALIASES = {
     "услуги": "услуга",
     "услуг": "услуга",
 }
+
+
+def _unit_alias_regex(value: str) -> str:
+    return re.escape(value).replace(r"\ ", r"[\s\u00a0]+")
+
+
+_UNIT_PREFIX = re.compile(
+    r"^(?P<unit>"
+    + "|".join(
+        _unit_alias_regex(alias)
+        for alias in sorted(_UNIT_ALIASES, key=len, reverse=True)
+    )
+    + r")(?=$|[\s\u00a0])",
+    re.IGNORECASE,
+)
 
 _CARDINAL_ONES = {
     "один": 1,
@@ -163,6 +183,10 @@ class UnknownIntakeValueError(ValueError):
     pass
 
 
+class UnsupportedAmountRangeError(ValueError):
+    """The scalar intake amount contract does not accept a range."""
+
+
 @dataclass(frozen=True)
 class ParsedAmount:
     amount: Decimal
@@ -176,14 +200,38 @@ class ParsedAmountSpan:
     span: tuple[int, int]
 
 
-_AMOUNT_SEARCH = re.compile(
+@dataclass(frozen=True)
+class ParsedUnitSpan:
+    unit: str
+    raw: str
+    span: tuple[int, int]
+
+
+_AMOUNT_EXPRESSION_PATTERN = (
     r"(?:(?P<label>бюджет|ориентировочная\s+сумма|сумма)\s*(?:[:—–-]\s*)?)?"
     r"(?:(?P<modifier>не\s+более|максимум|до|ориентировочно|примерно|порядка|около)\s+)?"
     r"(?P<number>\d[\d\s\u00a0]*(?:[.,]\d+)?)\s*"
     r"(?P<scale>миллион(?:а|ов)?|млн\.?|тысяч(?:а|и)?|тыс\.?)?\s*"
     r"(?:(?P<currency>рубл(?:ь|я|ей)|руб\.?|р\.?|₽)(?![а-яёa-z]))?"
     r"(?:\s+(?P<period>в\s+месяц|за\s+месяц|ежемесячно|"
-    r"в\s+квартал|в\s+год|за\s+год|ежегодно))?",
+    r"в\s+квартал|в\s+год|за\s+год|ежегодно))?"
+)
+_AMOUNT_EXPRESSION = re.compile(
+    rf"^{_AMOUNT_EXPRESSION_PATTERN}(?P<terminal>[.,!?])?$",
+    re.IGNORECASE,
+)
+_AMOUNT_SEARCH = re.compile(
+    rf"(?<![а-яёa-z0-9]){_AMOUNT_EXPRESSION_PATTERN}"
+    r"(?P<terminal>[.,!?])?(?![а-яёa-z0-9])",
+    re.IGNORECASE,
+)
+_AMOUNT_RANGE = re.compile(
+    r"\bот\s+\d[\d\s\u00a0]*(?:[.,]\d+)?\s*"
+    r"(?P<left_scale>миллион(?:а|ов)?|млн\.?|тысяч(?:а|и)?|тыс\.?)?"
+    r"\s+до\s+"
+    r"\d[\d\s\u00a0]*(?:[.,]\d+)?\s*"
+    r"(?P<right_scale>миллион(?:а|ов)?|млн\.?|тысяч(?:а|и)?|тыс\.?)?"
+    r"(?:\s*(?P<range_currency>рубл(?:ь|я|ей)|руб\.?|р\.?|₽))?",
     re.IGNORECASE,
 )
 
@@ -331,38 +379,14 @@ def parse_amount_expression(value: str) -> ParsedAmount:
         raise UnknownIntakeValueError(
             "Для завершения заявки нужна хотя бы ориентировочная сумма."
         )
-    period: BillingPeriod | None = None
-    period_match = re.search(
-        r"\s+(в\s+месяц|за\s+месяц|ежемесячно|в\s+квартал|"
-        r"в\s+год|за\s+год|ежегодно)$",
-        normalized,
-    )
-    if period_match is not None:
-        period = _billing_period(period_match.group(1))
-        normalized = normalized[: period_match.start()].strip()
-    normalized = re.sub(
-        r"^(?:бюджет|ориентировочная\s+сумма|сумма)\s*(?:[:—–-]\s*)?",
-        "",
-        normalized,
-    )
-    modifier: AmountModifier = "exact"
-    for candidate, prefixes in _AMOUNT_MODIFIERS:
-        prefix = next(
-            (item for item in prefixes if normalized.startswith(f"{item} ")),
-            None,
-        )
-        if prefix is not None:
-            modifier = candidate
-            normalized = normalized[len(prefix) :].strip()
-            break
-    match = re.fullmatch(
-        r"(?P<number>\d[\d\s\u00a0]*(?:[.,]\d+)?)\s*"
-        r"(?P<scale>миллион(?:а|ов)?|млн\.?|тысяч(?:а|и)?|тыс\.?)?\s*"
-        r"(?:рубл(?:ь|я|ей)|руб\.?|р\.?|₽)?",
-        normalized,
-    )
+    _reject_amount_range(normalized, full_expression=True)
+    match = _AMOUNT_EXPRESSION.fullmatch(normalized)
     if match is None:
         raise ValueError("Unsupported amount format")
+    return _parsed_amount_from_match(match)
+
+
+def _parsed_amount_from_match(match: re.Match[str]) -> ParsedAmount:
     compact = _SPACES.sub("", match.group("number")).replace(",", ".")
     try:
         result = Decimal(compact)
@@ -373,15 +397,26 @@ def parse_amount_expression(value: str) -> ParsedAmount:
         result *= 1_000_000
     elif scale:
         result *= 1000
+    raw_modifier = match.group("modifier")
+    modifier: AmountModifier = "exact"
+    if raw_modifier is not None:
+        normalized_modifier = " ".join(raw_modifier.casefold().split())
+        modifier = next(
+            candidate
+            for candidate, aliases in _AMOUNT_MODIFIERS
+            if normalized_modifier in aliases
+        )
+    raw_period = match.group("period")
     return ParsedAmount(
         amount=result,
         modifier=modifier,
-        billing_period=period,
+        billing_period=_billing_period(raw_period) if raw_period else None,
     )
 
 
 def find_amount_expression(value: str) -> ParsedAmountSpan | None:
     """Find one conservative amount phrase and its complete source span."""
+    _reject_amount_range(value)
     for match in _AMOUNT_SEARCH.finditer(value):
         has_amount_marker = (
             match.group("label") or match.group("scale") or match.group("currency")
@@ -395,10 +430,28 @@ def find_amount_expression(value: str) -> ParsedAmountSpan | None:
         trailing = len(match.group()) - len(match.group().rstrip())
         end = match.end() - trailing if trailing else match.end()
         return ParsedAmountSpan(
-            parsed=parse_amount_expression(raw),
+            parsed=_parsed_amount_from_match(match),
             span=(match.start() + leading, end),
         )
     return None
+
+
+def _reject_amount_range(value: str, *, full_expression: bool = False) -> None:
+    normalized = value.casefold().replace("ё", "е")
+    match = _AMOUNT_RANGE.search(normalized)
+    if match is None:
+        return
+    prefix = normalized[max(0, match.start() - 30) : match.start()]
+    labelled = bool(re.search(r"(?:бюджет|сумма)\s*(?:[:—–-]\s*)?$", prefix))
+    money_marked = bool(
+        match.group("left_scale")
+        or match.group("right_scale")
+        or match.group("range_currency")
+    )
+    if full_expression or labelled or money_marked:
+        raise UnsupportedAmountRangeError(
+            "Amount ranges are not supported by the scalar intake amount field"
+        )
 
 
 def amount_evidence(parsed: ParsedAmount) -> str:
@@ -433,6 +486,19 @@ def normalize_unit(value: str) -> str:
     if normalized not in _UNIT_ALIASES:
         raise ValueError("Unsupported unit")
     return _UNIT_ALIASES[normalized]
+
+
+def find_unit_prefix(value: str) -> ParsedUnitSpan | None:
+    """Return a canonical unit only when a known alias starts the value."""
+    match = _UNIT_PREFIX.match(value)
+    if match is None:
+        return None
+    raw = match.group("unit")
+    return ParsedUnitSpan(
+        unit=normalize_unit(raw),
+        raw=raw,
+        span=match.span("unit"),
+    )
 
 
 def normalize_procurement_type(value: str) -> str:

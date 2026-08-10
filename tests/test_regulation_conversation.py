@@ -480,6 +480,35 @@ def test_expired_pending_context_is_not_reused(
     assert renewed.known_slots.amount is None
 
 
+def test_household_question_after_completed_context_does_not_inherit_intent(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        72,
+        "Закупка стоит 240 тысяч рублей. Кто её согласует?",
+    )
+    adapter.handle_text(USER_ID, 1001, 73, "да")
+
+    outcome = adapter.handle_text(
+        USER_ID,
+        1001,
+        74,
+        "Как приготовить яблочный пирог?",
+    )
+    result = _result(storage, 74)
+
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "outside_domain"
+    assert result.sources == []
+    assert "вопрос" in outcome.text.casefold()
+    assert USER_ID not in storage.pending_regulation
+
+
 def test_plan_phrase_is_answered_without_unnecessary_clarification(
     qa_service: RegulationQuestionAnsweringService,
 ) -> None:

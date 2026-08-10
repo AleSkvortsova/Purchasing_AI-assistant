@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -22,7 +23,10 @@ from app.extraction.provider import (
 )
 from app.intake.models import IntakeFieldUpdate, IntakeStatus
 from app.intake.service import RequestIntakeService
-from app.intake_persistence.repositories import InMemoryIntakePersistenceRepository
+from app.intake_persistence.repositories import (
+    InMemoryIntakePersistenceRepository,
+    InMemoryIntakeStorage,
+)
 from app.intake_persistence.service import PersistentIntakeOrchestrator
 
 USER_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -77,7 +81,10 @@ def _assembly_raw() -> RawApprovalExtraction:
     )
 
 
-def test_furniture_assembly_hybrid_scenario_is_service_with_work_volume() -> None:
+def test_furniture_assembly_hybrid_scenario_is_service_with_work_volume(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(date(2026, 7, 28))
     intake, provider, adapter = _adapter(_assembly_raw())
     text = (
         "Нужно заказать услуги по сборке 3 шкафов и 2 офисных столов "
@@ -134,7 +141,10 @@ def test_hybrid_provider_failure_falls_back_without_losing_message() -> None:
     assert intake.get_active_session(USER_ID).request_id == outcome.result.request_id
 
 
-def test_conservative_fallback_keeps_numbers_but_not_semantic_guesses() -> None:
+def test_conservative_fallback_keeps_numbers_but_not_semantic_guesses(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(date(2026, 7, 28))
     _, provider, adapter = _adapter(
         RawApprovalExtraction(),
         error=RuntimeError("provider unavailable"),
@@ -396,6 +406,161 @@ def test_hybrid_explicit_structured_unit_beats_inferred_piece_unit() -> None:
 
     assert merged.values["unit"] == "л"
     assert merged.evidence_by_field["unit"] == "3 литра"
+
+
+def test_user_confirmed_packaging_unit_beats_structured_inferred_piece_unit() -> None:
+    deterministic = IntakeFieldUpdate(
+        values={"quantity": 50, "unit": "пач."},
+        source="user",
+        evidence_by_field={"quantity": "50", "unit": "пачек"},
+    )
+    structured = IntakeFieldUpdate(
+        values={"procurement_type": "goods", "quantity": 50, "unit": "шт."},
+        evidence_by_field={"quantity": "50 пачек", "unit": "50 пачек"},
+    )
+
+    merged = merge_intake_candidates(deterministic, structured)
+
+    assert merged.values["unit"] == "пач."
+    assert merged.evidence_by_field["unit"] == "пачек"
+
+
+def test_structured_unit_normalization_uses_shared_packaging_contract() -> None:
+    raw = RawApprovalExtraction(
+        procurement_type_raw="goods",
+        item_name_raw="бумага А4",
+        quantity_raw="50",
+        unit_raw="пачек",
+        confidence_by_field={
+            "procurement_type": 0.99,
+            "item_name": 0.99,
+            "quantity": 0.99,
+            "unit": 0.99,
+        },
+        evidence_by_field={
+            "procurement_type": "закупить",
+            "item_name": "бумаги А4",
+            "quantity": "50 пачек",
+            "unit": "пачек",
+        },
+    )
+    service = TelegramIntakeExtractionService(
+        FakeApprovalExtractionProvider(raw)
+    )
+
+    extracted = service.extract(
+        "Нужно закупить 50 пачек бумаги А4",
+        None,
+        None,
+        source_kind="initial_description",
+    )
+
+    assert extracted.update.values["quantity"] == Decimal("50")
+    assert extracted.update.values["unit"] == "пач."
+
+
+def test_structured_amount_uses_shared_terminal_punctuation_contract() -> None:
+    raw = RawApprovalExtraction(
+        amount_raw="До 120 000 рублей.",
+        confidence_by_field={"amount": 0.99},
+        evidence_by_field={"amount": "До 120 000 рублей."},
+    )
+    service = TelegramIntakeExtractionService(
+        FakeApprovalExtractionProvider(raw)
+    )
+
+    extracted = service.extract(
+        "До 120 000 рублей.",
+        None,
+        None,
+        source_kind="clarification_answer",
+    )
+
+    assert extracted.update.values["amount"] == Decimal("120000")
+    assert extracted.update.evidence_by_field["amount"] == (
+        "amount_modifier=maximum"
+    )
+
+
+def _paper_adapter(storage: InMemoryIntakeStorage) -> TelegramIntakeAdapter:
+    raw = RawApprovalExtraction(
+        procurement_type_raw="goods",
+        item_name_raw="бумага А4",
+        category_raw="G01",
+        confidence_by_field={
+            "procurement_type": 0.99,
+            "item_name": 0.99,
+            "category": 0.99,
+        },
+        evidence_by_field={
+            "procurement_type": "закупить",
+            "item_name": "бумагу А4",
+            "category": "бумагу А4",
+        },
+    )
+    repository = InMemoryIntakePersistenceRepository(storage)
+    orchestrator = PersistentIntakeOrchestrator(repository)
+    return TelegramIntakeAdapter(
+        orchestrator,
+        structured_extractor=TelegramIntakeExtractionService(
+            FakeApprovalExtractionProvider(raw)
+        ),
+        extraction_mode="hybrid",
+    )
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_unit"),
+    [
+        ("пачка", "пач."),
+        ("пачки", "пач."),
+        ("пачек", "пач."),
+        ("упаковка", "упак."),
+        ("упаковки", "упак."),
+        ("упаковок", "упак."),
+        ("коробка", "коробка"),
+        ("коробки", "коробка"),
+        ("коробок", "коробка"),
+        ("комплект", "комплект"),
+        ("комплекта", "комплект"),
+        ("комплектов", "комплект"),
+    ],
+)
+def test_packaging_unit_clarification_persists_after_adapter_reload(
+    reply: str,
+    expected_unit: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    first = _paper_adapter(storage).handle_text(
+        USER_ID,
+        1001,
+        900,
+        "Нужно закупить бумагу А4 для бухгалтерии.",
+    )
+    assert first.result is not None
+    assert first.result.intake_result.next_question is not None
+    assert first.result.intake_result.next_question.field_code == "quantity"
+
+    quantity = _paper_adapter(storage).handle_text(USER_ID, 1001, 901, "50")
+    assert quantity.result is not None
+    assert quantity.result.intake_result.next_question is not None
+    assert quantity.result.intake_result.next_question.field_code == "unit"
+
+    unit = _paper_adapter(storage).handle_text(USER_ID, 1001, 902, reply)
+    assert unit.result is not None
+    assert unit.result.intake_result.draft.quantity == Decimal("50")
+    assert unit.result.intake_result.draft.unit == expected_unit
+    assert unit.result.intake_result.next_question is not None
+    assert unit.result.intake_result.next_question.field_code != "unit"
+
+    reloaded = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage)
+    ).get_active_session(USER_ID)
+    assert reloaded.intake_result.draft.quantity == Decimal("50")
+    assert reloaded.intake_result.draft.unit == expected_unit
+    assert reloaded.intake_result.next_question is not None
+    assert reloaded.intake_result.next_question.field_code != "unit"
+    assert reloaded.intake_result.draft.unit != "шт."
 
 
 def test_g09_trace_fills_only_missing_typed_exact_category() -> None:
@@ -784,7 +949,10 @@ def test_air_conditioner_smoke_answer_replaces_proposal_without_conflict() -> No
     assert answered.result.intake_result.next_question.field_code != asked_field
 
 
-def test_countable_goods_smoke_extracts_unit_and_word_deadline_once() -> None:
+def test_countable_goods_smoke_extracts_unit_and_word_deadline_once(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(date(2026, 7, 28))
     raw = RawApprovalExtraction(
         amount_raw="1500 рублей",
         budget_status_raw="budgeted",

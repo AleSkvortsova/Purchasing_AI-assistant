@@ -118,6 +118,15 @@ STATUS_APPROVAL = _result(
     "На согласовании: требуется решение. На согласовании → Принята в работу "
     "→ В работе → Отклонена.",
 )
+DRAFT = _result(
+    "7d777777-7777-4777-8777-777777777777",
+    "kb-010",
+    "faq",
+    "FAQ внутренних заказчиков",
+    "Можно ли сохранить незавершённую заявку?",
+    "Незавершённую заявку можно сохранить как черновик и продолжить "
+    "заполнение позже.",
+)
 CANCELLATION = _result(
     "7c777777-7777-4777-8777-777777777777",
     "kb-001",
@@ -342,6 +351,23 @@ def test_outside_question_refuses_even_with_nearby_supplier_chunk() -> None:
     assert result.status == "insufficient_context"
     assert result.refusal_reason == "outside_kb"
     assert provider.calls == []
+
+
+def test_draft_action_retrieves_draft_rule_instead_of_status_overview() -> None:
+    retrieval = StaticRetrieval([STATUS_APPROVAL, DRAFT])
+
+    result = RegulationQuestionAnsweringService(
+        retrieval,
+        FakeGroundedAnswerProvider(),
+    ).answer(
+        "Можно ли начать оформлять заявку, сохранить её как черновик и "
+        "закончить позднее?"
+    )
+
+    assert result.status == "answered"
+    assert "продолжить" in result.answer.casefold()
+    assert retrieval.calls
+    assert [source.document_id for source in result.sources] == ["kb-010"]
 
 
 def test_ambiguous_approval_question_asks_for_missing_context() -> None:

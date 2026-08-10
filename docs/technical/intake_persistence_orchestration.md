@@ -211,4 +211,4 @@ explicit correction, рост версии, логи и финальную ка�
    `service_role` среди клиентских ролей.
 
 Полная процедура применения и повторной проверки описана в
-`docs/intake_persistence_migration_runbook.md`.
+`docs/technical/intake_persistence_migration_runbook.md`.

@@ -14,7 +14,7 @@ Embeddings хорошо находят смысловые совпадения, 
 - Reciprocal Rank Fusion (RRF) по позициям кандидатов.
 
 Сам retrieval по-прежнему только ранжирует чанки. Application-level grounded
-answer поверх него описан в `docs/regulation_qa.md`; retrieval contract, RPC и
+answer поверх него описан в `docs/technical/regulation_qa.md`; retrieval contract, RPC и
 индекс для Telegram не дублируются.
 
 Regulation Q&A может детерминированно выполнить до трёх запросов через этот же

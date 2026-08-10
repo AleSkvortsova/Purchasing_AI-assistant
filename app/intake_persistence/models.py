@@ -7,12 +7,19 @@ from pydantic import BaseModel, Field
 from app.intake.models import IntakeStatus, IntakeStepResult, NextQuestion
 
 
-class ProcurementItemCandidate(BaseModel):
+class ProcurementNeedCandidate(BaseModel):
     item_name: str
     procurement_type: Literal["goods", "service"]
-    category_code: str
-    category_label: str
+    category_code: str | None = None
+    category_label: str | None = None
+    category_candidates: list[str] = Field(default_factory=list)
+    action: str | None = None
+    evidence: str | None = None
+    relation: str = "separate_request"
     quantity: str | None = None
+
+
+ProcurementItemCandidate = ProcurementNeedCandidate
 
 
 class CategoryCandidateOption(BaseModel):
@@ -21,8 +28,18 @@ class CategoryCandidateOption(BaseModel):
 
 
 class IntakeConversationState(BaseModel):
-    item_candidates: list[ProcurementItemCandidate] = Field(default_factory=list)
+    item_candidates: list[ProcurementNeedCandidate] = Field(default_factory=list)
     category_candidates: list[CategoryCandidateOption] = Field(default_factory=list)
+    category_procurement_type: Literal["goods", "service"] | None = None
+    category_decomposition_fingerprint: str | None = None
+    decomposition_kind: Literal[
+        "single_need",
+        "multiple_goods",
+        "multiple_services",
+        "goods_plus_service",
+        "ambiguous",
+    ] | None = None
+    decomposition_fingerprint: str | None = None
     category_step_id: str | None = None
     split_required: bool = False
     category_question_fingerprint: str | None = None
@@ -44,6 +61,10 @@ class IntakeConversationState(BaseModel):
         return not (
             self.item_candidates
             or self.category_candidates
+            or self.category_procurement_type
+            or self.category_decomposition_fingerprint
+            or self.decomposition_kind
+            or self.decomposition_fingerprint
             or self.split_required
             or self.category_step_id
             or self.category_question_fingerprint

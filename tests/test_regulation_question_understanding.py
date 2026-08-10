@@ -443,3 +443,72 @@ def test_partial_fill_is_a_draft_task() -> None:
     )
 
     assert result.primary_intent == "draft_and_history"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Можно ли начать оформлять заявку, сохранить её как черновик и "
+        "закончить позднее?",
+        "Можно сохранить незаполненную заявку и вернуться к ней позже?",
+        "Если я не закончу заявку сейчас, смогу продолжить завтра?",
+        "Черновик заявки сохраняется?",
+        "Как продолжить ранее начатую заявку?",
+        "Можно начать заявку сегодня и закончить потом?",
+    ],
+)
+def test_draft_actions_have_priority_over_draft_status_literal(question: str) -> None:
+    result = understand_regulation_question(question)
+
+    assert result.primary_intent == "draft_and_history"
+    assert result.domain_decision == "known_domain_intent"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Что означает статус Черновик?",
+        "Какие переходы доступны из статуса Черновик?",
+    ],
+)
+def test_explicit_draft_status_questions_remain_status_questions(question: str) -> None:
+    result = understand_regulation_question(question)
+
+    assert result.primary_intent == "status_explanation"
+    assert result.status_name == "черновик"
+    assert result.domain_decision == "known_domain_intent"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Подскажи рецепт борща на четыре порции.",
+        "Какая погода завтра в Москве?",
+        "Кто сыграл главную роль в фильме «Ирония судьбы»?",
+        "Напиши функцию на Python для сортировки списка.",
+        "Куда поехать отдыхать в сентябре?",
+        "Как лечить простуду?",
+    ],
+)
+def test_out_of_domain_questions_are_not_guessed_as_procurement(question: str) -> None:
+    result = understand_regulation_question(question)
+
+    assert result.primary_intent == "outside_domain"
+    assert result.domain_decision == "outside_domain"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Какие продукты нужно указать в заявке на организацию мероприятия?",
+        "Можно ли заказать продукты для корпоративного мероприятия?",
+        "Какие сведения нужны для заявки на перевозку?",
+        "Как оформить закупку мебели?",
+        "Какая заявка считается срочной?",
+        "Можно ли объединить товар и услугу?",
+    ],
+)
+def test_near_domain_questions_pass_positive_domain_gate(question: str) -> None:
+    result = understand_regulation_question(question)
+
+    assert result.domain_decision != "outside_domain"

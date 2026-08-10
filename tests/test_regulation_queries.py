@@ -155,6 +155,14 @@ def test_live_supplier_price_question_has_no_regulation_context() -> None:
     assert select_relevant_regulation_chunks(plan, [nearby], limit=5) == []
 
 
+def test_outside_domain_plan_does_not_expand_query() -> None:
+    plan = build_regulation_query_plan("Какая погода завтра в Москве?")
+
+    assert plan.intent == "outside_domain"
+    assert plan.variants == ()
+    assert plan.broad_query == ""
+
+
 def _chunk(
     chunk_id: str,
     document_id: str,

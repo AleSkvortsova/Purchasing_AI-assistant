@@ -25,6 +25,12 @@ RegulationQuestionIntent = Literal[
     "supplier_recommendation",
     "general_help",
     "ambiguous_followup",
+    "outside_domain",
+]
+RegulationDomainDecision = Literal[
+    "known_domain_intent",
+    "ambiguous_domain",
+    "outside_domain",
 ]
 
 _EVENT_TERMS = re.compile(
@@ -63,6 +69,7 @@ class RegulationQuestionUnderstanding(BaseModel):
     requires_clarification: bool = False
     clarifying_question: str | None = None
     outside_kb_intent: bool = False
+    domain_decision: RegulationDomainDecision
     normalized_question: str
 
     @property
@@ -81,6 +88,7 @@ def understand_regulation_question(question: str) -> RegulationQuestionUnderstan
     status_name = _status_name(normalized)
     intents = _intents(normalized, status_name, category_hint)
     primary = intents[0]
+    domain_decision = _domain_decision(primary)
     missing, clarification = _clarification(
         primary,
         normalized=normalized,
@@ -119,6 +127,7 @@ def understand_regulation_question(question: str) -> RegulationQuestionUnderstan
         requires_clarification=clarification is not None,
         clarifying_question=clarification,
         outside_kb_intent=primary == "supplier_recommendation",
+        domain_decision=domain_decision,
         normalized_question=normalized,
     )
 
@@ -137,21 +146,25 @@ def _intents(
 
     intents: list[RegulationQuestionIntent] = []
     asks_cancellation = _asks_for_cancellation(value)
-    asks_status = status_name is not None or _asks_about_status(value)
+    draft_action = is_draft_question(value)
+    explicit_status = _asks_about_status(value)
+    asks_status = (status_name is not None or explicit_status) and not (
+        draft_action and not explicit_status
+    )
     if asks_cancellation:
         intents.append("request_cancellation")
     if asks_status and not asks_cancellation:
         intents.append("status_explanation")
     if _asks_for_approval(value) and not asks_status and not asks_cancellation:
         intents.append("approval_route")
-    if re.search(
+    if not draft_action and _procurement_domain_signal(value) and re.search(
         r"\b(?:сроч\w*|приоритет\w*|за\s+сколько\s+дн|"
         r"сегодня|завтра|послезавтра|через\s+\d+\s+(?:д|недел|месяц)|"
         r"остал\w*.{0,12}\d+\s+(?:д|недел))",
         value,
     ):
         intents.append("urgency_policy")
-    if is_draft_question(value) or is_history_question(value) or re.search(
+    if draft_action or is_history_question(value) or re.search(
         r"\bустн\w*", value
     ):
         intents.append("draft_and_history")
@@ -162,10 +175,18 @@ def _intents(
         value,
     ):
         intents.append("responsibility_policy")
-    asks_fields = _asks_for_fields(value)
+    asks_submission = bool(
+        re.search(r"\bможно\s+ли\s+подать\w*.{0,20}заяв\w*", value)
+    )
+    asks_fields = _asks_for_fields(value) or asks_submission
     asks_category = bool(re.search(r"\bкатегор\w*|к\s+какой\s+категор", value))
     if category_hint is not None and (
-        asks_category or (asks_fields and category_hint in {"S03", "S05"})
+        asks_category
+        or (
+            asks_fields
+            and not asks_submission
+            and category_hint in {"S03", "S05"}
+        )
     ):
         intents.append("category_classification")
     if asks_fields:
@@ -184,7 +205,34 @@ def _intents(
         )
     ):
         intents.extend(("category_classification", "required_fields"))
-    return tuple(dict.fromkeys(intents)) or ("required_fields",)
+    if intents:
+        return tuple(dict.fromkeys(intents))
+    if _procurement_domain_signal(value):
+        return ("ambiguous_followup",)
+    return ("outside_domain",)
+
+
+def _domain_decision(intent: RegulationQuestionIntent) -> RegulationDomainDecision:
+    if intent == "outside_domain":
+        return "outside_domain"
+    if intent == "ambiguous_followup":
+        return "ambiguous_domain"
+    return "known_domain_intent"
+
+
+def _procurement_domain_signal(value: str) -> bool:
+    """Require a positive procurement signal before regulation retrieval."""
+    return bool(
+        re.search(
+            r"\b(?:закуп\w*|заяв\w*|черновик\w*|товар\w*|услуг\w*|"
+            r"поставк\w*|поставщик\w*|подрядчик\w*|перевоз\w*|груз\w*|"
+            r"бюджет\w*|внебюджет\w*|соглас\w*|одобр\w*|категор\w*|"
+            r"сроч\w*|бренд\w*|эквивалент\w*|отмен\w*|закупщик\w*|"
+            r"оборудован\w*|мебел\w*|продукт\w*|лиценз\w*)\b",
+            value,
+        )
+        or is_procurement_event(value)
+    )
 
 
 def _asks_for_approval(value: str) -> bool:
@@ -249,6 +297,10 @@ def is_draft_question(value: str) -> bool:
             r"остав\w*.{0,20}незакончен\w*|"
             r"вернут\w*.{0,25}(?:заполн\w*|поздн\w*|потом)|"
             r"продолж\w*.{0,15}(?:потом|поздн|позже)|"
+            r"продолж\w*.{0,35}(?:ранее|начат\w*|заяв\w*)|"
+            r"(?:не\s+)?законч\w*.{0,35}(?:потом|поздн|завтра)|"
+            r"не\s+законч\w*.{0,60}продолж\w*|"
+            r"нача\w*.{0,25}заяв\w*.{0,35}законч\w*.{0,15}потом|"
             r"пока\s+не\s+зна\w*\s+все\s+данн\w*|"
             r"заполн\w*.{0,10}(?:частичн\w*|часть)|"
             r"не\s+.{0,15}отправля\w*.{0,15}сейчас|"
@@ -344,18 +396,21 @@ def _clarification(
 
 
 def _supplier_recommendation(value: str) -> bool:
-    return bool(
+    supplier_subject = bool(
+        re.search(
+            r"поставщик|перевозчик|подрядчик|поставляет|"
+            r"транспортн\w*\s+компан",
+            value,
+        )
+    )
+    return supplier_subject and bool(
         re.search(
             r"\b(?:кто|какой|какого|кого)\b.*\b(?:лучш\w*|дешев\w*|"
             r"надежн\w*|выбрать|посовет\w*|рекоменд\w*|предпоч\w*|услов\w*)|"
             r"\b(?:посовет\w*|рекоменд\w*)\b.*"
             r"\b(?:поставщик|перевозчик|подрядчик|"
-            r"транспортн\w*\s+компан)",
-            value,
-        )
-        and re.search(
-            r"поставщик|перевозчик|подрядчик|поставляет|"
-            r"транспортн\w*\s+компан",
+            r"транспортн\w*\s+компан)|"
+            r"\b(?:цен\w*|стоимост\w*|тариф\w*|рыночн\w*)\b",
             value,
         )
     )

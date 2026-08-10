@@ -318,7 +318,9 @@ def test_regulation_mode_uses_production_wiring_without_intake_or_extra_clients(
 
 def test_goods_scenario_uses_production_wiring_and_persists_inferred_unit(
     monkeypatch,
+    freeze_intake_today,
 ) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     text = (
         "Нужно купить 5 лампочек на случай замены перегоревших в офисе "
         "на Невском в срок через неделю"
@@ -365,7 +367,9 @@ def test_goods_scenario_uses_production_wiring_and_persists_inferred_unit(
 
 def test_service_volume_and_deadline_survive_production_persistence(
     monkeypatch,
+    freeze_intake_today,
 ) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     text = (
         "Нужно организовать заправку четырех картриджей для офисных "
         "принтеров, офис на Гражданском, не позднее 10 августа. "
@@ -410,7 +414,9 @@ def test_service_volume_and_deadline_survive_production_persistence(
 
 def test_full_location_and_one_response_per_message_in_production_wiring(
     monkeypatch,
+    freeze_intake_today,
 ) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     text = (
         "Нужно помыть окна в переговорной на Гражданском до 3 августа, "
         "в бюджете, 5 тыс. руб."
@@ -548,7 +554,9 @@ def test_budgeted_service_requirements_use_production_wiring(monkeypatch) -> Non
 
 def test_countable_goods_infers_piece_unit_through_production_wiring(
     monkeypatch,
+    freeze_intake_today,
 ) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     text = (
         "закажите семь тарелок на кухню в офис на Гражданском, "
         "до 4000 руб, не забюджетировано, к 3 августа"

@@ -29,6 +29,7 @@ RegulationQueryIntent = Literal[
     "general_help",
     "ambiguous_followup",
     "outside_kb",
+    "outside_domain",
     "generic",
 ]
 
@@ -70,6 +71,7 @@ class RegulationQueryPlan:
     broad_query: str
     variants: tuple[str, ...]
     intent: RegulationQueryIntent
+    primary_intent: RegulationQueryIntent
     intents: tuple[RegulationQueryIntent, ...]
     ambiguous: bool
     asks_for_example: bool
@@ -82,6 +84,22 @@ def build_regulation_query_plan(question: str) -> RegulationQueryPlan:
     normalized = understanding.normalized_question
     intents = _detect_intents(understanding)
     intent = intents[0]
+    primary_intent = _map_intent(understanding.primary_intent, understanding)
+    if understanding.domain_decision == "outside_domain":
+        return RegulationQueryPlan(
+            original_query=original,
+            normalized_query=normalized,
+            strict_query=normalized,
+            text_query="",
+            broad_query="",
+            variants=(),
+            intent="outside_domain",
+            primary_intent="outside_domain",
+            intents=("outside_domain",),
+            ambiguous=False,
+            asks_for_example=False,
+            understanding=understanding,
+        )
     text_terms = _meaningful_terms(normalized)
     queries_by_intent = [
         _intent_queries(understanding, item, text_terms) for item in intents
@@ -109,6 +127,7 @@ def build_regulation_query_plan(question: str) -> RegulationQueryPlan:
         ),
         variants=variants[:5],
         intent=intent,
+        primary_intent=primary_intent,
         intents=intents,
         ambiguous=understanding.primary_intent == "ambiguous_followup",
         asks_for_example=bool(re.search(r"\bпример\w*\b", normalized)),
@@ -255,7 +274,48 @@ def _detect_intents(
             mapped.append("general_help")
         elif intent == "ambiguous_followup":
             mapped.append("ambiguous_followup")
+        elif intent == "outside_domain":
+            mapped.append("outside_domain")
     return tuple(dict.fromkeys(mapped)) or ("generic",)
+
+
+def _map_intent(
+    intent: str,
+    understanding: RegulationQuestionUnderstanding,
+) -> RegulationQueryIntent:
+    mapping: dict[str, RegulationQueryIntent] = {
+        "approval_route": "approval",
+        "urgency_policy": "urgency",
+        "status_explanation": "status",
+        "request_cancellation": "request_cancellation",
+        "brand_equivalent_policy": "brand_policy",
+        "responsibility_policy": "responsibility",
+        "draft_and_history": "draft_history",
+        "supplier_recommendation": "outside_kb",
+        "general_help": "general_help",
+        "ambiguous_followup": "ambiguous_followup",
+        "outside_domain": "outside_domain",
+    }
+    if intent == "required_fields":
+        return (
+            "transport_fields"
+            if understanding.category_hint == "S03"
+            else "category_fields"
+        )
+    if intent == "category_classification":
+        if (
+            understanding.category_hint == "S03"
+            and "required_fields" in understanding.secondary_intents
+        ):
+            return "transport_fields"
+        return "mixed_categories" if (
+            understanding.purchase_type is None
+            and re.search(
+                r"вместе|одн\w*\s+заяв|\d+\s+заяв|объедин",
+                understanding.normalized_question,
+            )
+        ) else "category_fields"
+    return mapping.get(intent, "generic")
 
 
 def _intent_queries(
@@ -347,6 +407,8 @@ def _intent_queries(
         return ("официальная заявка устная просьба регистрация через ассистента",)
     if intent == "outside_kb":
         return ()
+    if intent == "outside_domain":
+        return ()
     return (" ".join(terms[:10]),)
 
 
@@ -411,6 +473,7 @@ def _expansion_terms(intent: RegulationQueryIntent) -> list[str]:
         "general_help": [],
         "ambiguous_followup": [],
         "outside_kb": [],
+        "outside_domain": [],
         "generic": [],
     }[intent]
 
@@ -499,6 +562,8 @@ def _supports_intent(chunk: SearchResult, intent: RegulationQueryIntent) -> bool
             re.search(r"устн|официальн|регистрац|ассистент", value)
         )
     if intent == "outside_kb":
+        return False
+    if intent == "outside_domain":
         return False
     return chunk.document_type not in _EXAMPLE_TYPES
 

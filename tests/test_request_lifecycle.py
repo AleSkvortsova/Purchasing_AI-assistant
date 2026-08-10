@@ -147,6 +147,52 @@ def test_unknown_budget_completes_intake_but_blocks_confirm() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("procurement_type", "item_name", "category_code"),
+    [
+        ("goods", "потолочные светильники", "G01"),
+        ("goods", "офисный стол", "G01"),
+        ("goods", "ноутбук", "G02"),
+        ("service", "перевозка груза", "S01"),
+    ],
+)
+def test_semantically_incompatible_category_cannot_be_confirmed(
+    procurement_type: str,
+    item_name: str,
+    category_code: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values.update(
+        {
+            "procurement_type": procurement_type,
+            "item_name": item_name,
+            "category_code": category_code,
+            "description": f"Закупка: {item_name}",
+        }
+    )
+    saved = intake.process_structured_step(USER_ID, update)
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+
+    assert saved.intake_result.status != IntakeStatus.READY_FOR_CONFIRMATION
+    assert "category_code" in saved.intake_result.completeness.invalid_fields
+    view = lifecycle.get_confirmation_view(saved.request_id, USER_ID)
+    assert view.confirmable is False
+    with pytest.raises(RequestNotReadyError):
+        lifecycle.confirm_request(
+            saved.request_id,
+            USER_ID,
+            saved.request_version,
+            f"confirm-semantic-mismatch-{procurement_type}-{category_code}",
+        )
+
+
 def test_confirm_registers_snapshot_dialog_logs_and_replay() -> None:
     storage, intake, lifecycle, saved = ready_fixture()
     storage.requests[saved.request_id].data["unrelated"] = {"preserved": True}

@@ -589,6 +589,16 @@ def _direct_understanding_answer(
     started: float,
 ) -> RegulationAnswer | None:
     understanding = plan.understanding
+    if understanding.domain_decision == "outside_domain":
+        return RegulationAnswer(
+            answer=(
+                "Я могу отвечать только на вопросы об оформлении и обработке "
+                "внутренних заявок на закупку. Уточните вопрос по закупке или заявке."
+            ),
+            status="insufficient_context",
+            refusal_reason="outside_domain",
+            diagnostics=_diagnostics(started, "not_called", 0, 0),
+        )
     if understanding.outside_kb_intent:
         return RegulationAnswer(
             answer=(
@@ -626,12 +636,7 @@ def _direct_understanding_answer(
             document_id = "kb-014"
             display_name = "Инструкция по работе с ассистентом"
         elif is_draft_question(understanding.normalized_question):
-            answer = (
-                "Да, незавершённую заявку можно сохранить как черновик и "
-                "продолжить её заполнение позже."
-            )
-            document_id = "kb-010"
-            display_name = "FAQ внутренних заказчиков"
+            return None
         else:
             return None
         return RegulationAnswer(
@@ -678,6 +683,7 @@ def _deterministic_grounded_payload(
         _deterministic_status_payload,
         _deterministic_cancellation_payload,
         _deterministic_responsibility_payload,
+        _deterministic_draft_payload,
         _deterministic_category_fields_payload,
     ):
         payload = builder(plan, chunks)
@@ -830,6 +836,35 @@ def _single_claim_payload(
         insufficient_context=False,
         source_conflict=False,
     )
+
+
+def _deterministic_draft_payload(
+    plan: RegulationQueryPlan,
+    chunks: Sequence[SearchResult],
+) -> GroundedAnswerPayload | None:
+    if plan.primary_intent != "draft_history" or not is_draft_question(
+        plan.normalized_query
+    ):
+        return None
+    chunk = next(
+        (
+            item
+            for item in chunks
+            if item.document_type in {"faq", "user_guide"}
+            and re.search(
+                r"черновик|сохран\w*.{0,30}заяв|продолж\w*.{0,20}позж",
+                normalize_regulation_query(item.content),
+            )
+        ),
+        None,
+    )
+    if chunk is None:
+        return None
+    answer = (
+        "Да, незавершённую заявку можно сохранить как черновик и продолжить "
+        "её заполнение позже."
+    )
+    return _single_claim_payload(answer, chunk)
 
 
 def _deterministic_urgency_payload(
@@ -1418,9 +1453,10 @@ def _claim_answers_intent(claim: str, plan: RegulationQueryPlan) -> bool:
         "general_help": r"$^",
         "ambiguous_followup": r"$^",
         "outside_kb": r"$^",
+        "outside_domain": r"$^",
         "generic": r"[a-zа-я0-9]",
     }
-    return any(re.search(patterns[intent], normalized) for intent in plan.intents)
+    return bool(re.search(patterns[plan.primary_intent], normalized))
 
 
 def _validate_concrete_values(

@@ -224,4 +224,4 @@ Offline demo: `python scripts/demo_request_lifecycle.py`.
 Migrations 007, 008 и 009 применены в Supabase. Migration 009 успешно выполнена
 повторно: уже синхронизированная заявка не изменила `updated_at` или version,
 а `final_request_card` и `final_approval_route` остались неизменными. Процедура
-аудита 008 сохранена в `docs/request_lifecycle_migration_runbook.md`.
+аудита 008 сохранена в `docs/technical/request_lifecycle_migration_runbook.md`.

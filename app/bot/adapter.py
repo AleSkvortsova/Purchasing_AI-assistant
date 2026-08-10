@@ -10,6 +10,7 @@ from app.bot.categories import (
     extract_procurement_items,
     normalize_software_scope_reply,
 )
+from app.bot.decomposition import decompose_procurement_needs
 from app.bot.dialog_modes import (
     DialogModePersistenceError,
     DialogModeRepository,
@@ -397,6 +398,30 @@ class TelegramIntakeAdapter:
             if not use_structured:
                 raise
             update = IntakeFieldUpdate()
+        proposed_category = update.values.get("category_code")
+        active_type = (
+            active.intake_result.draft.procurement_type
+            if active is not None
+            else None
+        )
+        if (
+            proposed_category is not None
+            and active_type is not None
+            and not (
+                proposed_category in {"G05", "S05"}
+                and {"G05", "S05"}.issubset(category_candidates)
+            )
+            and not proposed_category.startswith(
+                "G" if active_type == "goods" else "S"
+            )
+        ):
+            return self._category_parse_failure(
+                context,
+                active,
+                key,
+                message_id,
+                category_candidates,
+            )
         parsed_update = update
         self._debug_event(
             key,
@@ -539,11 +564,20 @@ class TelegramIntakeAdapter:
                 category_candidates,
             )
         elif update.values.get("procurement_type") in {"goods", "service"}:
-            classification = self._categories.classify(
-                text,
-                update.values.get("procurement_type"),
+            selected_type = update.values["procurement_type"]
+            source = " ".join(
+                value
+                for value in (
+                    active.intake_result.draft.item_name if active else None,
+                    active.intake_result.draft.description if active else None,
+                    text,
+                )
+                if value
             )
+            classification = self._categories.classify(source, selected_type)
             candidate_codes = classification.candidates[:4]
+            if classification.kind == "exact" and classification.category_code:
+                candidate_codes = (classification.category_code,)
             if candidate_codes:
                 intake_conversation = IntakeConversationState(
                     category_candidates=[
@@ -553,8 +587,11 @@ class TelegramIntakeAdapter:
                         )
                         for code in candidate_codes
                     ],
+                    category_procurement_type=selected_type,
                     category_step_id=f"category:{key}",
                 )
+            else:
+                intake_conversation = IntakeConversationState()
         elif (
             active is not None
             and active.intake_result.draft.category_code is None
@@ -570,6 +607,11 @@ class TelegramIntakeAdapter:
                         )
                         for code in candidate_codes
                     ],
+                    category_procurement_type=(
+                        active.intake_result.draft.procurement_type.value
+                        if active.intake_result.draft.procurement_type is not None
+                        else None
+                    ),
                     category_step_id=f"category:{key}",
                 )
         step_kwargs = {
@@ -1218,9 +1260,26 @@ class TelegramIntakeAdapter:
     ) -> tuple[str, ...]:
         if active is None:
             return ()
+        procurement_type = active.intake_result.draft.procurement_type
+        expected_prefix = (
+            "G"
+            if procurement_type == "goods"
+            else "S"
+            if procurement_type == "service"
+            else None
+        )
         stored = active.dialog_state.intake_conversation.category_candidates
         if stored:
-            return tuple(option.code for option in stored)
+            state_type = (
+                active.dialog_state.intake_conversation.category_procurement_type
+            )
+            if state_type is not None and procurement_type != state_type:
+                return ()
+            return tuple(
+                option.code
+                for option in stored
+                if expected_prefix is None or option.code.startswith(expected_prefix)
+            )
         question = active.intake_result.next_question
         if question is None or question.field_code != "category_code":
             return ()
@@ -1239,6 +1298,76 @@ class TelegramIntakeAdapter:
         message_id: int,
         text: str,
     ) -> TelegramIntakeOutcome | None:
+        decomposition = decompose_procurement_needs(text)
+        if decomposition.kind == "goods_plus_service":
+            candidates = [
+                ProcurementItemCandidate(
+                    item_name=need.subject,
+                    procurement_type=need.procurement_type,
+                    category_code=need.category_code,
+                    category_label=(
+                        CATEGORY_NAMES[need.category_code]
+                        if need.category_code is not None
+                        else None
+                    ),
+                    category_candidates=list(need.category_candidates),
+                    action=need.action,
+                    evidence=need.evidence,
+                    relation=need.relation,
+                    quantity=(
+                        str(need.quantity) if need.quantity is not None else None
+                    ),
+                )
+                for need in decomposition.needs
+            ]
+            extracted = self._parser.parse(text)
+            preserved = {
+                field: value
+                for field, value in extracted.values.items()
+                if field
+                not in {
+                    "procurement_type",
+                    "item_name",
+                    "title",
+                    "description",
+                    "category_code",
+                    "quantity",
+                    "unit",
+                    "specifications",
+                    "desired_result",
+                }
+            }
+            if decomposition.common_context is not None:
+                preserved.setdefault(
+                    "delivery_location", decomposition.common_context
+                )
+            state = IntakeConversationState(
+                item_candidates=candidates,
+                split_required=True,
+                decomposition_kind=decomposition.kind,
+                decomposition_fingerprint=decomposition.fingerprint,
+                original_description=text,
+                reason_code="multi_category_split_required",
+            )
+            result = self._orchestrator.process_structured_step(
+                user.user_id,
+                IntakeFieldUpdate(values=preserved),
+                request_id=active.request_id if active is not None else None,
+                incoming_message=self._envelope(message_id, "telegram_split"),
+                idempotency_key=key,
+                intake_conversation=state,
+            )
+            response = _mixed_need_split_response(candidates)
+            outcome = TelegramIntakeOutcome(
+                response,
+                key,
+                IntakeFieldUpdate(values=preserved),
+                result,
+                reason_code="multi_category_split_required",
+            )
+            self._remember_message_outcome(key, outcome)
+            return outcome
+
         items = extract_procurement_items(text)
         if len({item.category_code for item in items}) < 2:
             return None
@@ -1270,6 +1399,8 @@ class TelegramIntakeAdapter:
         state = IntakeConversationState(
             item_candidates=candidates,
             split_required=True,
+            decomposition_kind="multiple_goods",
+            decomposition_fingerprint=decomposition.fingerprint,
             reason_code="multi_category_split_required",
         )
         result = self._orchestrator.process_structured_step(
@@ -1473,8 +1604,9 @@ class TelegramIntakeAdapter:
         values: dict[str, object] = {
             "procurement_type": selected.procurement_type,
             "item_name": selected.item_name,
-            "category_code": selected.category_code,
         }
+        if selected.category_code is not None:
+            values["category_code"] = selected.category_code
         if selected.quantity is not None:
             values["quantity"] = selected.quantity
         update = IntakeFieldUpdate(values=values)
@@ -1643,6 +1775,14 @@ class TelegramIntakeAdapter:
             ],
             category_step_id=previous.category_step_id
             or f"category:{active.request_version}",
+            category_procurement_type=(
+                active.intake_result.draft.procurement_type.value
+                if active.intake_result.draft.procurement_type is not None
+                else None
+            ),
+            category_decomposition_fingerprint=(
+                previous.decomposition_fingerprint
+            ),
             category_question_fingerprint=fingerprint,
             category_clarification_repeats=(
                 previous.category_clarification_repeats if repeats is None else repeats
@@ -1750,8 +1890,22 @@ def _selected_item(
         item
         for item in candidates
         if item.item_name in normalized
-        or _short_category_label(item.category_code) in normalized
-        or item.category_label.casefold() in normalized
+        or (
+            item.category_code is not None
+            and _short_category_label(item.category_code) in normalized
+        )
+        or (
+            item.category_label is not None
+            and item.category_label.casefold() in normalized
+        )
+        or (
+            item.procurement_type == "goods"
+            and any(word in normalized for word in ("товар", "поставк"))
+        )
+        or (
+            item.procurement_type == "service"
+            and any(word in normalized for word in ("услуг", "работ", "монтаж"))
+        )
         or (item.category_code == "G05" and "лиценз" in normalized)
         or (
             item.category_code == "S05"
@@ -1790,6 +1944,10 @@ def _software_split_state(original_description: str) -> IntakeConversationState:
             CategoryCandidateOption(code="S05", label=CATEGORY_NAMES["S05"]),
         ],
         split_required=True,
+        decomposition_kind="goods_plus_service",
+        decomposition_fingerprint=sha256(
+            original_description.casefold().encode("utf-8")
+        ).hexdigest()[:16],
         original_description=original_description,
         reason_code="multi_category_split_required",
     )
@@ -1802,6 +1960,23 @@ def _software_split_response() -> str:
         "(S05). Потребности разных категорий нужно оформить отдельными "
         "заявками. С чего начнём: с приобретения лицензий или с установки?"
     )
+
+
+def _mixed_need_split_response(
+    candidates: list[ProcurementItemCandidate],
+) -> str:
+    lines = ["В описании я вижу две отдельные потребности:"]
+    for index, candidate in enumerate(candidates, start=1):
+        type_label = "товар" if candidate.procurement_type == "goods" else "услуга"
+        lines.append(f"{index}. {candidate.item_name.capitalize()} — {type_label}.")
+    lines.extend(
+        (
+            "",
+            "По правилам их нужно оформить отдельными заявками.",
+            "С какой начнём?",
+        )
+    )
+    return "\n".join(lines)
 
 
 def _user_context(user: ResolvedTelegramUser | UUID) -> ResolvedTelegramUser:

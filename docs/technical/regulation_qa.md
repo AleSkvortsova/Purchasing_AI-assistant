@@ -8,7 +8,8 @@ Telegram Q&A не создаёт второй RAG. Цепочка использ
 Telegram regulation_qa
 → RegulationQuestionAnsweringService
 → RegulationQuestionUnderstanding
-→ slot-based clarification / outside-KB routing
+→ positive domain gate: known / ambiguous / outside
+→ slot-based clarification / unsupported-capability routing
 → deterministic query plan (до пяти вариантов)
 → KnowledgeRetrievalService
 → OpenAIEmbeddingProvider
@@ -30,10 +31,12 @@ answer providers, при этом prompt contracts остаются раздел
 
 До retrieval детерминированный understanding layer создаёт закрытую Pydantic-
 модель `RegulationQuestionUnderstanding`. Она хранит основной и дополнительные
-intent, сумму, бюджетный статус, относительный срок, статус заявки, предмет,
-тип и категорию закупки, известные и обязательные отсутствующие поля. Для
-содержательных вопросов конечный intent всегда типизирован; общий fallback не
-выдаётся за распознанное бизнес-намерение.
+intent, решение `known_domain_intent` / `ambiguous_domain` / `outside_domain`,
+сумму, бюджетный статус, относительный срок, статус заявки, предмет, тип и
+категорию закупки, известные и обязательные отсутствующие поля. Неизвестный
+текст больше не превращается в `required_fields`: для запуска retrieval нужен
+положительный закупочный сигнал. Очевидный outside-domain вопрос получает
+контролируемый отказ до query expansion, embedding и retrieval.
 
 Уточнение строится по отсутствующим слотам. Например, для маршрута согласования
 обязательны сумма и бюджетный статус, а для общего вопроса «Что мне указать?» —
@@ -53,6 +56,12 @@ Original, concise factual и terminology-expanded варианты каждый
 проходят через существующий hybrid retrieval. Их позиции объединяются вторым
 position-based RRF с тем же `RAG_RRF_K`; raw scores не складываются.
 
+Слово «черновик» классифицируется по конструкции вопроса. Действия
+сохранить/продолжить/вернуться дают `draft_and_history`; формулировки «что
+означает статус» и «какие переходы из статуса» сохраняют
+`status_explanation`. Вопрос о сохранении черновика проходит retrieval по FAQ
+или пользовательской инструкции и не опирается только на справочник статусов.
+
 Relevance filtering принимает нормативные документы, FAQ и инструкции, когда
 каждый из них подтверждает отдельный аспект вопроса. Один фрагмент не обязан
 покрывать весь многосоставный вопрос. Examples/templates по-прежнему не могут
@@ -68,8 +77,10 @@ Structured DTO ответа содержит текст, проверяемые 
 контекста и противоречие источников. Каждый claim содержит собственные
 `cited_chunk_ids`, должен входить в итоговый answer и подтверждаться текстом
 источника. Service принимает только реально переданные чанки, проверяет
-релевантность claim типу вопроса, конкретные числовые значения и длинное
-дословное копирование.
+релевантность claim обязательному primary intent исходного вопроса, конкретные
+числовые значения и длинное дословное копирование. Secondary intent может
+дополнить ответ, но не заменить primary intent. Сам факт наличия похожего
+фрагмента не является доказательством релевантности ответа.
 
 Тип документа переводится в `normative`, `instruction`, `faq`, `example` или
 `template`. Для обычного вопроса examples/templates удаляются из контекста,
@@ -173,6 +184,13 @@ Primary и secondary intents активного уточнения имеют п
 вопросов — в `regulation_qa_holdout_cases.json`. Второй blind holdout хранится
 отдельно и фиксируется до первого выполнения, чтобы результаты не использовались
 для настройки кода.
+
+Отдельный `regulation_domain_cases.json` содержит независимые бытовые OOD,
+near-domain, ambiguous и конфликтные status/draft формулировки. Скрипт
+`evaluate_regulation_domain.py` вызывает фактический offline service flow и
+раздельно считает domain classification, OOD rejection, primary intent,
+final-answer relevance, source support, unsupported concrete values и example
+leakage.
 
 Строгая end-to-end метрика разделена на две независимые части:
 

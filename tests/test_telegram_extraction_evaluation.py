@@ -127,7 +127,10 @@ def test_telegram_holdout_has_required_shape_and_at_least_30_cases() -> None:
     } <= tags
 
 
-def test_evaluator_reports_scalar_accuracy_and_hallucination_metrics() -> None:
+def test_evaluator_reports_scalar_accuracy_and_hallucination_metrics(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     cases = [
         {
             "case_id": "scalar_metrics",
@@ -158,7 +161,10 @@ def test_evaluator_reports_scalar_accuracy_and_hallucination_metrics() -> None:
     assert "hallucinated_date_rate" in metrics
 
 
-def test_new_deterministic_scalar_holdout_cases_match_without_network() -> None:
+def test_new_deterministic_scalar_holdout_cases_match_without_network(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     new_tags = {
         "word_quantity",
         "measure_unit",
@@ -182,7 +188,10 @@ def test_new_deterministic_scalar_holdout_cases_match_without_network() -> None:
     assert metrics["hallucinated_date_rate"] == 0
 
 
-def test_fake_hybrid_evaluation_resolves_furniture_assembly_case() -> None:
+def test_fake_hybrid_evaluation_resolves_furniture_assembly_case(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     case = next(
         case
         for case in _cases()
