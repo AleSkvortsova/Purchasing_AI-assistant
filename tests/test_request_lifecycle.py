@@ -176,6 +176,11 @@ def test_semantically_incompatible_category_cannot_be_confirmed(
         }
     )
     saved = intake.process_structured_step(USER_ID, update)
+    # Simulate a legacy/manually assembled persisted draft that carries the
+    # category value but not the field-level provenance used by the intake UI.
+    storage.requests[saved.request_id].data["intake"]["field_states"].pop(
+        "category_code", None
+    )
     lifecycle = RequestLifecycleService(
         InMemoryRequestLifecycleRepository(storage), core
     )
@@ -190,6 +195,60 @@ def test_semantically_incompatible_category_cannot_be_confirmed(
             USER_ID,
             saved.request_version,
             f"confirm-semantic-mismatch-{procurement_type}-{category_code}",
+        )
+
+
+@pytest.mark.parametrize(
+    ("procurement_type", "item_name", "category_code"),
+    [
+        ("goods", "промышленный вентилятор", "G02"),
+        ("goods", "промышленный насос", "G03"),
+        ("goods", "упаковочная машина", "G01"),
+        ("service", "техническая диагностика неизвестного оборудования", "S14"),
+    ],
+)
+def test_unknown_subject_category_cannot_be_confirmed_without_positive_support(
+    procurement_type: str,
+    item_name: str,
+    category_code: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values.update(
+        {
+            "procurement_type": procurement_type,
+            "item_name": item_name,
+            "category_code": category_code,
+            "description": f"Потребность: {item_name}",
+        }
+    )
+    if procurement_type == "service":
+        update.values.pop("quantity", None)
+        update.values.pop("unit", None)
+    saved = intake.process_structured_step(USER_ID, update)
+    # Confirmation must recalculate semantic support even for a persisted
+    # draft assembled without intake field provenance.
+    storage.requests[saved.request_id].data["intake"]["field_states"].pop(
+        "category_code", None
+    )
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+
+    assert saved.intake_result.status != IntakeStatus.READY_FOR_CONFIRMATION
+    assert "category_code" in saved.intake_result.completeness.invalid_fields
+    view = lifecycle.get_confirmation_view(saved.request_id, USER_ID)
+    assert view.confirmable is False
+    with pytest.raises(RequestNotReadyError):
+        lifecycle.confirm_request(
+            saved.request_id,
+            USER_ID,
+            saved.request_version,
+            f"confirm-unsupported-category-{procurement_type}-{category_code}",
         )
 
 

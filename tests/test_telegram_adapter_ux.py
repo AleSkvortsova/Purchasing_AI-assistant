@@ -23,6 +23,7 @@ from app.bot.normalization import (
 from app.bot.parser import DeterministicIntakeParser, TelegramParseError
 from app.bot.users import ResolvedTelegramUser
 from app.extraction.openai_schema import OpenAIApprovalExtractionPayload
+from app.intake.card import RequestCardBuilder
 from app.intake.models import (
     CompletenessResult,
     IntakeFieldUpdate,
@@ -1271,3 +1272,140 @@ def test_profile_does_not_replace_the_field_currently_answered_by_user() -> None
     active = _persistent(RequestDraftData(), awaiting="department")
     update = TelegramIntakeAdapter._profile_update(profile, active, "department")
     assert update.values == {"contact_person": "Иван Петров"}
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "для сотрудников сборочного участка",
+        "для замены старого оборудования",
+        "на склад на Парнасе",
+        "до 15 сентября",
+        "чтобы снизить простои",
+    ],
+)
+def test_department_awaiting_field_rejects_semantically_incompatible_reply(
+    reply: str,
+) -> None:
+    with pytest.raises(TelegramParseError, match="подразделен"):
+        DeterministicIntakeParser().parse(
+            reply,
+            awaiting_field_code="department",
+        )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Производство",
+        "Складская логистика",
+        "АХО",
+        "Отдел продаж",
+        "Бухгалтерия",
+    ],
+)
+def test_department_awaiting_field_accepts_department_names(reply: str) -> None:
+    update = DeterministicIntakeParser().parse(
+        reply,
+        awaiting_field_code="department",
+    )
+
+    assert update.values == {"department": reply}
+
+
+@pytest.mark.parametrize(
+    ("field_code", "reply", "message_term"),
+    [
+        ("contact_person", "на склад на Парнасе", "контактного лица"),
+        ("contact_person", "до 15 сентября", "контактного лица"),
+        ("delivery_location", "чтобы снизить простои", "место поставки"),
+        ("delivery_location", "до 15 сентября", "место поставки"),
+    ],
+)
+def test_other_high_risk_awaiting_fields_reject_obvious_mismatch(
+    field_code: str,
+    reply: str,
+    message_term: str,
+) -> None:
+    with pytest.raises(TelegramParseError, match=message_term):
+        DeterministicIntakeParser().parse(reply, awaiting_field_code=field_code)
+
+
+@pytest.mark.parametrize(
+    ("field_code", "reply"),
+    [
+        ("contact_person", "Мария"),
+        ("contact_person", "Иван Петров"),
+        ("delivery_location", "Склад на Парнасе"),
+        ("delivery_location", "Невский проспект, 10"),
+    ],
+)
+def test_other_high_risk_awaiting_fields_keep_normal_replies(
+    field_code: str,
+    reply: str,
+) -> None:
+    update = DeterministicIntakeParser().parse(reply, awaiting_field_code=field_code)
+
+    assert update.values == {field_code: reply}
+
+
+def test_department_mismatch_does_not_survive_adapter_persistence_or_reach_card(
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(date(2026, 7, 29))
+    repository = InMemoryIntakePersistenceRepository()
+    orchestrator = PersistentIntakeOrchestrator(repository)
+    seeded = orchestrator.process_structured_step(
+        USER_ID,
+        IntakeFieldUpdate(
+            values={
+                "procurement_type": "goods",
+                "category_code": "G02",
+                "item_name": "офисные кресла",
+                "quantity": "10",
+                "unit": "шт.",
+                "specifications": "эргономичные",
+                "analogs_allowed": True,
+                "amount": "180000",
+                "budget_status": "budgeted",
+                "desired_delivery_date": "2026-08-20",
+                "delivery_location": "Офис",
+                "business_justification": "Оснащение рабочих мест",
+                "contact_person": "Анна Петрова",
+            }
+        ),
+    )
+    assert seeded.intake_result.next_question is not None
+    assert seeded.intake_result.next_question.field_code == "department"
+    class MustNotCallStructuredExtractor:
+        def resolve_message(self, *args, **kwargs):
+            raise AssertionError(
+                "semantic mismatch must not call structured extraction"
+            )
+
+    adapter = TelegramIntakeAdapter(
+        orchestrator,
+        structured_extractor=MustNotCallStructuredExtractor(),  # type: ignore[arg-type]
+        extraction_mode="hybrid",
+    )
+
+    with pytest.raises(TelegramParseError, match="подразделен"):
+        adapter.handle_text(
+            USER_ID,
+            chat_id=1001,
+            message_id=501,
+            text="для сотрудников сборочного участка",
+        )
+
+    reloaded = orchestrator.get_active_session(USER_ID)
+    assert reloaded.intake_result.draft.department is None
+    assert "department" in reloaded.intake_result.completeness.missing_fields
+    assert reloaded.intake_result.next_question is not None
+    assert reloaded.intake_result.next_question.field_code == "department"
+    card = RequestCardBuilder().build(reloaded.intake_result.draft)
+    card_fields = {
+        field.code
+        for section in card.sections
+        for field in section.fields
+    }
+    assert "department" not in card_fields

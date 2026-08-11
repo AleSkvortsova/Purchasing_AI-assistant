@@ -19,10 +19,27 @@ from app.intake.validators import IntakeFieldValidator
 
 _SPACES = re.compile(r"[\s\u00a0]+")
 _CATEGORY_CODE = re.compile(r"^([A-Za-z]\d{2})(?:\s*[—–-].*)?$", re.DOTALL)
+_OBVIOUS_DATE_REPLY = re.compile(
+    r"^(?:до|к|не\s+позднее)\s+\d{1,2}(?:[./-]\d{1,2}|\s+[а-яё]+)",
+    re.IGNORECASE,
+)
+_PURPOSE_REPLY = re.compile(
+    r"^(?:для\s+(?:сотрудник|замен|снижен|обеспеч|работ)|"
+    r"чтобы\s+|с\s+целью\s+)",
+    re.IGNORECASE,
+)
+_LOCATION_REPLY = re.compile(
+    r"^(?:на\s+склад|в\s+офис|по\s+адресу|на\s+площадк)",
+    re.IGNORECASE,
+)
 
 
 class TelegramParseError(ValueError):
     """A safe validation hint that can be returned to a Telegram user."""
+
+
+class TelegramSemanticMismatchError(TelegramParseError):
+    """A high-confidence mismatch that must not fall through to extraction."""
 
 
 class DeterministicIntakeParser:
@@ -66,6 +83,9 @@ class DeterministicIntakeParser:
             raise TelegramParseError(
                 "Не удалось определить ожидаемый вопрос. Повторите команду /start."
             )
+        compatibility_error = _high_risk_compatibility_error(field_code, value)
+        if compatibility_error is not None:
+            raise TelegramSemanticMismatchError(compatibility_error)
         try:
             evidence: dict[str, str] = {}
             if field_code == "amount":
@@ -179,3 +199,28 @@ class DeterministicIntakeParser:
         if field_code == "budget_status":
             return "Ответьте, предусмотрена ли закупка в утверждённом бюджете."
         return "Проверьте ответ и попробуйте ещё раз."
+
+
+def _high_risk_compatibility_error(field_code: str, value: str) -> str | None:
+    normalized = " ".join(value.casefold().replace("ё", "е").split())
+    date_like = bool(_OBVIOUS_DATE_REPLY.search(normalized))
+    purpose_like = bool(_PURPOSE_REPLY.search(normalized))
+    location_like = bool(_LOCATION_REPLY.search(normalized))
+    if field_code == "department" and (date_like or purpose_like or location_like):
+        return (
+            "Похоже, это не название подразделения. Укажите, пожалуйста, "
+            "подразделение, которое оформляет заявку."
+        )
+    if field_code == "contact_person" and (
+        date_like or purpose_like or location_like
+    ):
+        return (
+            "Похоже, это не имя контактного лица. Укажите, пожалуйста, имя "
+            "сотрудника, с которым можно связаться по заявке."
+        )
+    if field_code == "delivery_location" and (date_like or purpose_like):
+        return (
+            "Похоже, это не место поставки или оказания услуги. Укажите, "
+            "пожалуйста, адрес, офис, склад или площадку."
+        )
+    return None

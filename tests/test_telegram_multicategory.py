@@ -64,6 +64,98 @@ def test_natural_category_aliases(
 
 
 @pytest.mark.parametrize(
+    ("text", "procurement_type", "expected"),
+    [
+        ("офисное кресло", "goods", "G02"),
+        ("ноутбук", "goods", "G03"),
+        ("офисная бумага", "goods", "G01"),
+        ("средства индивидуальной защиты", "goods", "G08"),
+        ("уборка офиса", "service", "S02"),
+        ("ремонт и обслуживание оборудования", "service", "S01"),
+        ("перевозка груза", "service", "S03"),
+    ],
+)
+def test_strong_category_subjects_have_positive_classifier_support(
+    text: str,
+    procurement_type: str,
+    expected: str,
+) -> None:
+    result = DeterministicCategoryClassifier().classify(text, procurement_type)
+
+    assert result.kind == "exact"
+    assert result.category_code == expected
+
+
+def test_generic_category_fallback_is_not_presented_as_strong_evidence() -> None:
+    storage = InMemoryIntakeStorage()
+    seeded = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage)
+    ).process_structured_step(
+        USER_ID,
+        IntakeFieldUpdate(
+            values={
+                "procurement_type": "goods",
+                "item_name": "промышленный вентилятор",
+            }
+        ),
+    )
+    assert seeded.intake_result.next_question is not None
+    assert seeded.intake_result.next_question.field_code == "category_code"
+
+    outcome = _adapter(storage).handle_text(
+        USER_ID,
+        1001,
+        500,
+        "какие варианты",
+    )
+
+    assert "Не удалось уверенно определить категорию" in outcome.text
+    assert all(code not in outcome.text for code in ("G01", "G02", "G03", "G04"))
+    assert outcome.result is not None
+    assert not outcome.result.dialog_state.intake_conversation.category_candidates
+
+
+def test_generic_fallback_candidate_is_explicitly_weak() -> None:
+    option = CategoryCandidateOption(
+        code="G01",
+        label="Офисные принадлежности",
+        source="generic_fallback",
+        selectable=False,
+        readiness_eligible=False,
+    )
+
+    assert option.source == "generic_fallback"
+    assert option.selectable is False
+    assert option.readiness_eligible is False
+
+
+def test_strong_candidate_provenance_survives_state_round_trip() -> None:
+    option = CategoryCandidateOption(
+        code="G02",
+        label="Мебель и оснащение",
+        source="classifier_exact",
+        selectable=True,
+        readiness_eligible=True,
+    )
+
+    restored = CategoryCandidateOption.model_validate(option.model_dump())
+
+    assert restored == option
+    assert restored.source == "classifier_exact"
+    assert restored.readiness_eligible is True
+
+
+def test_legacy_candidate_without_provenance_is_weak_by_default() -> None:
+    restored = CategoryCandidateOption.model_validate(
+        {"code": "G02", "label": "Мебель и оснащение"}
+    )
+
+    assert restored.source == "generic_fallback"
+    assert restored.selectable is False
+    assert restored.readiness_eligible is False
+
+
+@pytest.mark.parametrize(
     "selection",
     [
         "компьютер",

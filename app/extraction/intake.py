@@ -281,6 +281,23 @@ def merge_intake_candidates(
     for field_name in deterministic.suppressed_extraction_fields:
         values.pop(field_name, None)
         evidence.pop(field_name, None)
+    deterministic_type = deterministic.values.get("procurement_type")
+    structured_type = structured.values.get("procurement_type")
+    deterministic_type_supported = (
+        deterministic_type in {"goods", "service"}
+        and bool(deterministic.evidence_by_field.get("procurement_type"))
+    )
+    if deterministic_type_supported:
+        if structured_type in {None, deterministic_type}:
+            values["procurement_type"] = deterministic_type
+            evidence["procurement_type"] = deterministic.evidence_by_field[
+                "procurement_type"
+            ]
+        elif structured_type in {"goods", "service"}:
+            values.pop("procurement_type", None)
+            values.pop("category_code", None)
+            evidence.pop("procurement_type", None)
+            evidence.pop("category_code", None)
     for field_name in _DETERMINISTIC_AUTHORITY_FIELDS:
         if field_name not in deterministic.values:
             continue
@@ -368,6 +385,11 @@ def conservative_deterministic_fallback(
         for field_name, value in deterministic.values.items()
         if field_name in _DETERMINISTIC_AUTHORITY_FIELDS
     }
+    if (
+        deterministic.values.get("procurement_type") in {"goods", "service"}
+        and deterministic.evidence_by_field.get("procurement_type")
+    ):
+        values["procurement_type"] = deterministic.values["procurement_type"]
     evidence = {
         field_name: value
         for field_name, value in deterministic.evidence_by_field.items()

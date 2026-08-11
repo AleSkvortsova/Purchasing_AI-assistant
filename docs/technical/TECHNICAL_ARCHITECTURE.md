@@ -114,11 +114,24 @@ JSON являются синхронизированными проекциям�
 Положительные извлечённые факты требуют evidence; отсутствие упоминания может
 обосновывать `false` без искусственного фрагмента.
 
+Явный deterministic `procurement_type` с evidence имеет тот же приоритет при
+structured null, rejection и provider fallback. Совпадающий structured type
+подтверждает результат; противоположный тип очищается вместе с несовместимой
+категорией и переводит flow в контролируемое уточнение вместо silent overwrite.
+
 `IntakeConversationState` хранит ожидаемое поле, вопрос, этап, кандидатов
 предметов и категорий, показанные варианты, выбранную категорию, fingerprint и
-счётчик повторов. Goods и services используют общий механизм. Кандидаты
-переживают перезагрузку adapter через `dialog_states.state_data`; выбрать можно
-номер, полное или частичное название.
+счётчик повторов. Category option дополнительно хранит provenance и отдельные
+признаки допустимости показа и readiness. Goods и services используют общий
+механизм. Strong candidates переживают перезагрузку adapter через
+`dialog_states.state_data`; выбрать можно номер, полное или частичное название.
+Generic fallback и legacy option без provenance считаются weak и не доказывают
+совместимость категории.
+
+Conversational mode не владеет intake draft. Явный вход в Regulation Q&A
+очищает только старый regulation pending; `/start` переводит mode в `idle` и
+также очищает pending. В обоих случаях `active_request_id` и canonical draft
+сохраняются. Переход в intake очищает regulation pending.
 
 `save_intake_step` транзакционно обновляет версию заявки, канонический draft,
 состояние диалога, входящее сообщение и результат шага. Optimistic locking не
@@ -175,6 +188,11 @@ checksum и структуру, затем детерминированно фо
 останавливается до query expansion и не получает источников. Активный pending
 clarification является отдельным подтверждённым контекстом, поэтому короткие
 ответы «да», «нет» и «не знаю» продолжают многошаговый диалог.
+
+Domain decision учитывает explicit purpose: личное назначение без рабочего
+контекста отклоняется, организационное принимается, а их сочетание требует
+уточнения. Cancellation распознаётся по action/target конструкции независимо
+от расстояния между глаголом и объектом.
 
 Semantic retrieval использует cosine similarity embeddings. Lexical retrieval
 применяет Russian FTS (с fallback на `simple`) к заголовку, пути раздела и
@@ -269,7 +287,9 @@ webhook не используются. Supabase остаётся внешней 
 - decomposition использует высокоточные action-based признаки и программную
   validation; неявное mixed-намерение по-прежнему может потребовать уточнения;
 - category candidates связаны с типом и fingerprint decomposition, а semantic
-  compatibility повторно проверяется при readiness и lifecycle confirm;
+  compatibility с positive support повторно проверяется при readiness и
+  lifecycle confirm; unknown subject не может стать confirmable только по
+  G/S-префиксу;
 - полноценного массива `request_items` и автоматической регистрации обеих
   потребностей нет;
 - нет отдельного поля даты начала услуги;

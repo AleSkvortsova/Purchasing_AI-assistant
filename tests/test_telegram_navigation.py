@@ -39,6 +39,10 @@ from app.intake_persistence.models import (
 )
 from app.intake_persistence.repositories import InMemoryIntakeStorage
 from app.rag.answering import RegulationAnswer, RegulationSource
+from app.rag.conversation import (
+    RegulationKnownSlots,
+    RegulationPendingClarification,
+)
 from app.schemas.common import RequestStatus, RequestType
 from app.schemas.request import RequestRead
 
@@ -353,6 +357,40 @@ def test_regulation_mode_is_persistent_isolated_and_preserves_draft() -> None:
     current = restarted.handle_menu(USER_ID, MENU_CURRENT)
     assert modes.get_mode(USER_ID) == "intake"
     assert "Мониторы" in current.text
+
+
+def test_regulation_reentry_and_start_clear_pending_but_preserve_active_draft() -> None:
+    mode_storage = InMemoryDialogModeStorage()
+    modes = InMemoryDialogModeRepository(mode_storage)
+    orchestrator = FakeOrchestrator(_active())
+    adapter = TelegramIntakeAdapter(
+        orchestrator,
+        parser=FailingParser(),
+        dialog_modes=modes,
+        regulation_qa=FakeRegulationService(),
+    )
+    pending = RegulationPendingClarification(
+        original_question="Кто согласует закупку на 180 тысяч?",
+        primary_intent="approval_route",
+        known_slots=RegulationKnownSlots(amount=Decimal("180000")),
+        missing_slots=("budget_status",),
+        clarifying_question="Предусмотрена ли закупка бюджетом?",
+    )
+
+    modes.set_mode(USER_ID, "regulation_qa")
+    modes.save_pending_regulation(USER_ID, pending)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    assert modes.get_pending_regulation(USER_ID) is None
+    assert orchestrator.active.intake_result.draft.item_name == "Мониторы"
+
+    modes.save_pending_regulation(USER_ID, pending)
+    message = adapter.start_message(USER_ID)
+
+    assert modes.get_mode(USER_ID) == "idle"
+    assert modes.get_pending_regulation(USER_ID) is None
+    assert "незавершённая заявка" in message
+    assert orchestrator.active.intake_result.draft.item_name == "Мониторы"
 
 
 def test_regulation_exit_and_new_request_switch_modes_without_rag_call() -> None:

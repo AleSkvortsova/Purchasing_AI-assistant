@@ -491,11 +491,17 @@ def test_item_name_remains_required() -> None:
         complete_goods(
             procurement_type="goods",
             category_code="G05",
+            item_name="Лицензии на офисное программное обеспечение",
+            specifications="Нужно приобрести готовые лицензии",
             delivery_location=None,
         ),
         complete_service(delivery_location=None, work_on_site=False),
         complete_service(
             category_code="S05",
+            item_name="Доработка информационной системы",
+            description="Доработать корпоративную систему",
+            specifications="Настроить интеграцию",
+            desired_result="Работающая интеграция",
             has_data_access=False,
             delivery_location=None,
             work_on_site=False,

@@ -110,9 +110,14 @@ class DeterministicEntityExtractor:
             original, self._dates
         )
         category = self._categories.classify(original)
-        procurement_type = self._procurement_type(original, category.category_code)
+        procurement_type, procurement_type_evidence = self._procurement_type(
+            original,
+            category.category_code,
+        )
         if procurement_type is not None:
             values["procurement_type"] = procurement_type
+            if procurement_type_evidence is not None:
+                evidence["procurement_type"] = procurement_type_evidence
             category = self._categories.classify(original, procurement_type)
         if category.kind == "exact" and category.category_code is not None:
             values["category_code"] = category.category_code
@@ -179,20 +184,31 @@ class DeterministicEntityExtractor:
         )
 
     @staticmethod
-    def _procurement_type(text: str, category_code: str | None) -> str | None:
+    def _procurement_type(
+        text: str,
+        category_code: str | None,
+    ) -> tuple[str | None, str | None]:
         normalized = text.casefold().replace("ё", "е")
-        if re.search(r"\b(?:купить|закупить|приобрести|товар)\w*", normalized):
-            return "goods"
-        if re.search(
+        goods = re.search(
+            r"\b(?:купить|закупить|приобрести|товар)\w*",
+            normalized,
+        )
+        if goods is not None:
+            return "goods", text[goods.start() : goods.end()]
+        service = re.search(
             r"\b(?:услуг|уборк|клининг|ремонт|монтаж|разработк|сборк|"
             r"установ|настройк|обслуживан|перевозк|доставк|заправк|"
             r"помыть|мыть|мойк)\w*",
             normalized,
-        ):
-            return "service"
+        )
+        if service is not None:
+            return "service", text[service.start() : service.end()]
         if category_code:
-            return "goods" if category_code.startswith("G") else "service"
-        return None
+            return (
+                "goods" if category_code.startswith("G") else "service",
+                None,
+            )
+        return None, None
 
 
 def _remove_span(value: str, span: tuple[int, int]) -> str:

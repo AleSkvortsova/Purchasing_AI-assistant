@@ -254,6 +254,92 @@ def test_cancellation_has_priority_over_status_words(question: str) -> None:
 @pytest.mark.parametrize(
     "question",
     [
+        "Можно ли отменить уже начатую, но ещё не отправленную заявку?",
+        "Как отменить черновик заявки?",
+        "Я передумал, можно отказаться от ещё не отправленной заявки?",
+        "Можно удалить начатую заявку?",
+    ],
+)
+def test_draft_cancellation_uses_action_and_target_without_distance_limit(
+    question: str,
+) -> None:
+    result = understand_regulation_question(question)
+
+    assert result.primary_intent == "request_cancellation"
+    assert result.requires_clarification is False
+    assert result.missing_required_context == ()
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_intent"),
+    [
+        ("Что означает статус Отменена?", "status_explanation"),
+        ("Кто может отменить заявку после отправки?", "request_cancellation"),
+    ],
+)
+def test_cancellation_action_is_distinct_from_cancelled_status(
+    question: str,
+    expected_intent: str,
+) -> None:
+    assert understand_regulation_question(question).primary_intent == expected_intent
+
+
+@pytest.mark.parametrize(
+    ("personal", "internal"),
+    [
+        (
+            "Я хочу купить себе домой новый холодильник. Какую марку лучше выбрать?",
+            "Нужно купить холодильник в офисную кухню. Можно ли указать марку?",
+        ),
+        (
+            "Хочу купить ноутбук себе. Какой бренд выбрать?",
+            "Нужно купить ноутбук сотруднику. Какой бренд можно указать?",
+        ),
+        (
+            "Нужен принтер домой. Какие требования указать?",
+            "Нужен принтер для бухгалтерии. Какие требования указать?",
+        ),
+    ],
+)
+def test_personal_and_internal_purpose_are_distinguished(
+    personal: str,
+    internal: str,
+) -> None:
+    personal_result = understand_regulation_question(personal)
+    internal_result = understand_regulation_question(internal)
+
+    assert personal_result.domain_decision == "outside_domain"
+    assert internal_result.domain_decision == "known_domain_intent"
+
+
+def test_conflicting_personal_and_org_purpose_requires_clarification() -> None:
+    result = understand_regulation_question(
+        "Хочу купить ноутбук себе для рабочего места в офисе. Что указать?"
+    )
+
+    assert result.domain_decision == "ambiguous_domain"
+    assert result.requires_clarification is True
+    assert "личного" in result.clarifying_question.casefold()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Что означает статус «На согласовании»?",
+        "Кто согласует закупку на 180 тысяч рублей?",
+        "Какая заявка считается срочной?",
+    ],
+)
+def test_canonical_regulation_intents_do_not_require_org_purpose(question: str) -> None:
+    assert (
+        understand_regulation_question(question).domain_decision
+        == "known_domain_intent"
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
         "Заявки, которые я подавала раньше",
         "Что я уже отправляла?",
         "Мои предыдущие заявки",

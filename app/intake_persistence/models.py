@@ -25,6 +25,15 @@ ProcurementItemCandidate = ProcurementNeedCandidate
 class CategoryCandidateOption(BaseModel):
     code: str
     label: str
+    source: Literal[
+        "classifier_exact",
+        "classifier_multiple",
+        "derived",
+        "persisted_strong",
+        "generic_fallback",
+    ] = "generic_fallback"
+    selectable: bool = False
+    readiness_eligible: bool = False
 
 
 class IntakeConversationState(BaseModel):

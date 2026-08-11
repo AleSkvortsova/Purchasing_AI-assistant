@@ -159,6 +159,82 @@ def test_approval_clarification_survives_adapter_restart(
     assert USER_ID not in storage.pending_regulation
 
 
+def test_explicit_regulation_reentry_clears_pending_and_slots(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    first = _adapter(storage, qa_service)
+    first.handle_menu(USER_ID, MENU_REGULATIONS)
+    first.handle_text(
+        USER_ID,
+        1001,
+        10001,
+        "Закупка на 240 тысяч рублей. Кто согласует?",
+    )
+    assert storage.pending_regulation[USER_ID].known_slots.amount == 240000
+
+    restarted = _adapter(storage, qa_service)
+    restarted.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    assert storage.modes[USER_ID] == "regulation_qa"
+    assert USER_ID not in storage.pending_regulation
+
+    restarted.handle_text(USER_ID, 1001, 10002, "Кто согласует закупку?")
+    renewed = storage.pending_regulation[USER_ID]
+    assert renewed.primary_intent == "approval_route"
+    assert renewed.known_slots.amount is None
+    assert set(renewed.missing_slots) == {"amount", "budget_status"}
+
+
+def test_start_resets_persisted_regulation_context_without_deleting_intake(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    first = _adapter(storage, qa_service)
+    first.handle_menu(USER_ID, MENU_REGULATIONS)
+    first.handle_text(
+        USER_ID,
+        1001,
+        10003,
+        "Закупка на 180 тысяч рублей. Кто согласует?",
+    )
+    assert USER_ID in storage.pending_regulation
+
+    restarted = _adapter(storage, qa_service)
+    restarted.start_message(USER_ID)
+
+    assert storage.modes[USER_ID] == "idle"
+    assert USER_ID not in storage.pending_regulation
+    with pytest.raises(AssertionError, match="intake must not run in regulation mode"):
+        restarted.handle_text(
+            USER_ID,
+            1001,
+            10004,
+            "Нужно купить пять ноутбуков для сотрудников",
+        )
+
+
+def test_clean_regulation_entry_routes_draft_cancellation_without_slot_questions(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    outcome = adapter.handle_text(
+        USER_ID,
+        1001,
+        10005,
+        "Можно ли отменить уже начатую, но ещё не отправленную заявку?",
+    )
+    result = _result(storage, 10005)
+
+    assert result.status == "answered"
+    assert "сумм" not in outcome.text.casefold()
+    assert "товар или услугу" not in outcome.text.casefold()
+    assert USER_ID not in storage.pending_regulation
+
+
 @pytest.mark.parametrize(
     ("reply", "budget_status", "answer_term"),
     [

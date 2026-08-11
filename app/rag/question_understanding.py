@@ -88,7 +88,7 @@ def understand_regulation_question(question: str) -> RegulationQuestionUnderstan
     status_name = _status_name(normalized)
     intents = _intents(normalized, status_name, category_hint)
     primary = intents[0]
-    domain_decision = _domain_decision(primary)
+    domain_decision = _domain_decision(primary, normalized)
     missing, clarification = _clarification(
         primary,
         normalized=normalized,
@@ -98,6 +98,14 @@ def understand_regulation_question(question: str) -> RegulationQuestionUnderstan
         purchase_type=purchase_type,
         category_hint=category_hint,
     )
+    if _has_personal_purpose(normalized) and _has_organisational_purpose(
+        normalized
+    ):
+        missing = ("purchase_purpose",)
+        clarification = (
+            "Уточните, покупка нужна для личного использования или для "
+            "рабочих задач организации?"
+        )
     known_fields = tuple(
         name
         for name, value in (
@@ -212,12 +220,43 @@ def _intents(
     return ("outside_domain",)
 
 
-def _domain_decision(intent: RegulationQuestionIntent) -> RegulationDomainDecision:
+def _domain_decision(
+    intent: RegulationQuestionIntent,
+    value: str,
+) -> RegulationDomainDecision:
+    personal = _has_personal_purpose(value)
+    organisational = _has_organisational_purpose(value)
+    if personal and organisational:
+        return "ambiguous_domain"
+    if personal:
+        return "outside_domain"
     if intent == "outside_domain":
         return "outside_domain"
     if intent == "ambiguous_followup":
         return "ambiguous_domain"
     return "known_domain_intent"
+
+
+def _has_personal_purpose(value: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:себе|домой|для\s+дома|лично|для\s+семьи|"
+            r"в\s+квартиру|для\s+дачи|для\s+личного\s+использования)\b",
+            value,
+        )
+    )
+
+
+def _has_organisational_purpose(value: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:в\s+офис(?:ную|е)?|для\s+офиса|для\s+подразделения|"
+            r"сотрудник(?:у|ам|ов)?|на\s+склад|для\s+производства|"
+            r"для\s+компании|для\s+рабочего\s+места|"
+            r"для\s+мероприятия\s+компании|для\s+бухгалтерии)\b",
+            value,
+        )
+    )
 
 
 def _procurement_domain_signal(value: str) -> bool:
@@ -264,17 +303,20 @@ def _asks_about_status(value: str) -> bool:
 
 
 def _asks_for_cancellation(value: str) -> bool:
-    return bool(
+    action = bool(
         re.search(
-            r"\b(?:отмен\w*|снят\w*|снять|отказ\w*)\b.{0,20}заяв\w*|"
-            r"\bзаяв\w*.{0,20}(?:больше\s+не\s+нужн\w*|отмен\w*)|"
-            r"\bпотребност\w*\s+(?:исчезл\w*|отменен\w*)|"
-            r"\bпотребност\w*\s+отпал\w*|"
-            r"\b(?:убра\w*|отказа\w*)\b.{0,20}заяв\w*|"
-            r"\bостанов\w*.{0,20}закуп\w*",
+            r"\b(?:отмен\w*|снят\w*|снять|отказ\w*|удал\w*|"
+            r"убра\w*|не\s+отправля\w*|останов\w*)\b",
             value,
         )
+        or re.search(
+            r"\bпотребност\w*\s+(?:исчезл\w*|отменен\w*|отпал\w*)",
+            value,
+        )
+        or re.search(r"\bбольше\s+не\s+нужн\w*", value)
     )
+    target = bool(re.search(r"\b(?:заяв\w*|черновик\w*|запрос\w*|закуп\w*)\b", value))
+    return action and target
 
 
 def _asks_for_fields(value: str) -> bool:

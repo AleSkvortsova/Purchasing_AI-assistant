@@ -309,6 +309,36 @@ def test_outside_domain_is_rejected_before_retrieval(question: str) -> None:
     assert provider.calls == []
 
 
+def test_explicit_personal_purchase_is_rejected_before_retrieval() -> None:
+    retrieval = FakeRetrieval([CHUNK_A])
+    provider = FakeGroundedAnswerProvider()
+
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Я хочу купить себе домой холодильник. Какую марку лучше выбрать?"
+    )
+
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "outside_domain"
+    assert result.diagnostics["retrieval_status"] == "not_called"
+    assert retrieval.calls == []
+    assert provider.calls == []
+
+
+def test_conflicting_personal_and_internal_purpose_clarifies_before_retrieval() -> None:
+    retrieval = FakeRetrieval([CHUNK_A])
+    provider = FakeGroundedAnswerProvider()
+
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Нужен ноутбук себе для рабочего места в офисе. Что указать?"
+    )
+
+    assert result.status == "clarification_required"
+    assert "личного использования" in result.answer
+    assert result.diagnostics["retrieval_status"] == "not_called"
+    assert retrieval.calls == []
+    assert provider.calls == []
+
+
 def test_secondary_intent_claim_cannot_replace_primary_answer() -> None:
     fields = _chunk(
         "33333333-3333-4333-8333-333333333333",

@@ -109,7 +109,7 @@ class IntakeFieldValidator:
                 errors["category_code"] = (
                     "Категория не соответствует типу закупки"
                 )
-            elif "category_code" in draft.field_states:
+            else:
                 from app.bot.categories import DeterministicCategoryClassifier
 
                 classification = DeterministicCategoryClassifier().classify_draft(
@@ -129,6 +129,20 @@ class IntakeFieldValidator:
                     and {draft.category_code, classification.category_code}
                     <= {"G03", "G04"}
                 )
+                category_state = draft.field_states.get("category_code")
+                persisted_support = bool(
+                    category_state is not None
+                    and category_state.confirmed
+                    and isinstance(category_state.evidence, str)
+                    and category_state.evidence.startswith("category_support=")
+                    and category_state.evidence.removeprefix("category_support=")
+                    in {
+                        "classifier_exact",
+                        "classifier_multiple",
+                        "derived",
+                        "persisted_strong",
+                    }
+                )
                 incompatible = (
                     classification.kind == "exact"
                     and classification.category_code != draft.category_code
@@ -137,8 +151,9 @@ class IntakeFieldValidator:
                     bool(classification.candidates)
                     and draft.category_code not in classification.candidates
                 )
-                if incompatible:
+                unsupported = classification.kind == "none" and not persisted_support
+                if incompatible or unsupported:
                     errors["category_code"] = (
-                        "Категория явно не соответствует предмету закупки"
+                        "Категория не имеет подтверждённой связи с предметом закупки"
                     )
         return errors

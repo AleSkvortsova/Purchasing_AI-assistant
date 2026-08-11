@@ -51,7 +51,11 @@ from app.bot.keyboards import (
     parse_navigation_callback,
     regulation_actions,
 )
-from app.bot.parser import DeterministicIntakeParser, TelegramParseError
+from app.bot.parser import (
+    DeterministicIntakeParser,
+    TelegramParseError,
+    TelegramSemanticMismatchError,
+)
 from app.bot.request_history import RequestHistoryError, RequestHistoryService
 from app.bot.users import ResolvedTelegramUser
 from app.extraction.intake import (
@@ -196,6 +200,7 @@ class TelegramIntakeAdapter:
         self._awaiting_new_request_description: set[UUID] = set()
 
     def start_message(self, user_id: UUID) -> str:
+        self._dialog_modes.set_mode(user_id, "idle")
         active = self._active_or_none(user_id)
         if active is None:
             return WELCOME_TEXT
@@ -217,6 +222,7 @@ class TelegramIntakeAdapter:
                 reply_markup=instruction_actions(),
             )
         if action == MENU_REGULATIONS:
+            self._dialog_modes.clear_pending_regulation(context.user_id)
             self._dialog_modes.set_mode(context.user_id, "regulation_qa")
             return TelegramIntakeOutcome(
                 REGULATION_INTRO_TEXT,
@@ -386,6 +392,8 @@ class TelegramIntakeAdapter:
                 None if editing else awaiting_field_code,
                 category_candidates,
             )
+        except TelegramSemanticMismatchError:
+            raise
         except TelegramParseError:
             if question is not None and question.field_code == "category_code":
                 return self._category_parse_failure(
@@ -399,6 +407,27 @@ class TelegramIntakeAdapter:
                 raise
             update = IntakeFieldUpdate()
         proposed_category = update.values.get("category_code")
+        if isinstance(proposed_category, str) and active is not None:
+            selected_option = next(
+                (
+                    option
+                    for option in (
+                        active.dialog_state.intake_conversation.category_candidates
+                    )
+                    if option.code == proposed_category
+                    and option.selectable
+                    and option.readiness_eligible
+                ),
+                None,
+            )
+            if selected_option is not None:
+                category_evidence = dict(update.evidence_by_field)
+                category_evidence["category_code"] = (
+                    f"category_support={selected_option.source}"
+                )
+                update = update.model_copy(
+                    update={"evidence_by_field": category_evidence}
+                )
         active_type = (
             active.intake_result.draft.procurement_type
             if active is not None
@@ -584,6 +613,13 @@ class TelegramIntakeAdapter:
                         CategoryCandidateOption(
                             code=code,
                             label=CATEGORY_NAMES[code],
+                            source=(
+                                "classifier_exact"
+                                if classification.kind == "exact"
+                                else "classifier_multiple"
+                            ),
+                            selectable=True,
+                            readiness_eligible=True,
                         )
                         for code in candidate_codes
                     ],
@@ -604,6 +640,9 @@ class TelegramIntakeAdapter:
                         CategoryCandidateOption(
                             code=code,
                             label=CATEGORY_NAMES[code],
+                            source="derived",
+                            selectable=True,
+                            readiness_eligible=True,
                         )
                         for code in candidate_codes
                     ],
@@ -1278,7 +1317,9 @@ class TelegramIntakeAdapter:
             return tuple(
                 option.code
                 for option in stored
-                if expected_prefix is None or option.code.startswith(expected_prefix)
+                if option.selectable
+                and option.readiness_eligible
+                and (expected_prefix is None or option.code.startswith(expected_prefix))
             )
         question = active.intake_result.next_question
         if question is None or question.field_code != "category_code":
@@ -1456,8 +1497,20 @@ class TelegramIntakeAdapter:
         else:
             state = IntakeConversationState(
                 category_candidates=[
-                    CategoryCandidateOption(code="G05", label=CATEGORY_NAMES["G05"]),
-                    CategoryCandidateOption(code="S05", label=CATEGORY_NAMES["S05"]),
+                    CategoryCandidateOption(
+                        code="G05",
+                        label=CATEGORY_NAMES["G05"],
+                        source="derived",
+                        selectable=True,
+                        readiness_eligible=True,
+                    ),
+                    CategoryCandidateOption(
+                        code="S05",
+                        label=CATEGORY_NAMES["S05"],
+                        source="derived",
+                        selectable=True,
+                        readiness_eligible=True,
+                    ),
                 ],
                 category_step_id=f"software-scope:{key}",
                 category_question_fingerprint=sha256(
@@ -1727,9 +1780,7 @@ class TelegramIntakeAdapter:
         derived = self._derived_category_candidates(active, latest_text)
         if derived:
             return derived
-        if active.intake_result.draft.procurement_type == "service":
-            return ("S01", "S03", "S05", "S15")
-        return ("G01", "G02", "G03", "G04")
+        return ()
 
     def _derived_category_candidates(
         self,
@@ -1768,11 +1819,32 @@ class TelegramIntakeAdapter:
             if question is not None
             else None
         )
-        return IntakeConversationState(
-            category_candidates=[
-                CategoryCandidateOption(code=code, label=CATEGORY_NAMES[code])
+        strong_persisted_codes = {
+            option.code
+            for option in previous.category_candidates
+            if option.selectable and option.readiness_eligible
+        }
+        reuse_persisted = bool(candidates and set(candidates) <= strong_persisted_codes)
+        options = (
+            [
+                option.model_copy(deep=True)
+                for option in previous.category_candidates
+                if option.code in candidates
+            ]
+            if reuse_persisted
+            else [
+                CategoryCandidateOption(
+                    code=code,
+                    label=CATEGORY_NAMES[code],
+                    source="derived",
+                    selectable=True,
+                    readiness_eligible=True,
+                )
                 for code in candidates
-            ],
+            ]
+        )
+        return IntakeConversationState(
+            category_candidates=options,
             category_step_id=previous.category_step_id
             or f"category:{active.request_version}",
             category_procurement_type=(
@@ -1864,7 +1936,10 @@ def _category_help_requested(text: str) -> bool:
 
 def _format_category_candidates(candidates: tuple[str, ...]) -> str:
     if not candidates:
-        return "Опишите предмет закупки подробнее, чтобы подобрать категории."
+        return (
+            "Не удалось уверенно определить категорию. Уточните назначение "
+            "или опишите предмет закупки подробнее."
+        )
     options = "\n".join(
         f"{index}. {CATEGORY_NAMES[code]} ({code})"
         for index, code in enumerate(candidates[:4], start=1)
@@ -1940,8 +2015,20 @@ def _software_split_state(original_description: str) -> IntakeConversationState:
             ),
         ],
         category_candidates=[
-            CategoryCandidateOption(code="G05", label=CATEGORY_NAMES["G05"]),
-            CategoryCandidateOption(code="S05", label=CATEGORY_NAMES["S05"]),
+            CategoryCandidateOption(
+                code="G05",
+                label=CATEGORY_NAMES["G05"],
+                source="derived",
+                selectable=True,
+                readiness_eligible=True,
+            ),
+            CategoryCandidateOption(
+                code="S05",
+                label=CATEGORY_NAMES["S05"],
+                source="derived",
+                selectable=True,
+                readiness_eligible=True,
+            ),
         ],
         split_required=True,
         decomposition_kind="goods_plus_service",

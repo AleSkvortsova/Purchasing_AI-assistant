@@ -131,13 +131,11 @@ def test_hybrid_provider_failure_falls_back_without_losing_message() -> None:
     )
 
     assert provider.calls == 1
-    assert outcome.result.intake_result.draft.procurement_type is None
+    assert outcome.result.intake_result.draft.procurement_type == "goods"
     assert outcome.result.intake_result.draft.category_code is None
     assert outcome.result.intake_result.draft.item_name is None
     assert outcome.result.intake_result.draft.quantity == 5
-    assert outcome.result.intake_result.next_question.field_code == (
-        "procurement_type"
-    )
+    assert outcome.result.intake_result.next_question.field_code != "procurement_type"
     assert intake.get_active_session(USER_ID).request_id == outcome.result.request_id
 
 
@@ -632,6 +630,81 @@ def test_typed_category_fallback_never_overwrites_openai_category() -> None:
     )
 
     assert merged.values["category_code"] == "S02"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_type"),
+    [
+        ("Профилактическое обслуживание трёх погрузчиков", "service"),
+        ("Монтаж оборудования", "service"),
+        ("Уборка офиса", "service"),
+        ("Купить ноутбук", "goods"),
+        ("Закупить стеллажи", "goods"),
+    ],
+)
+def test_explicit_deterministic_procurement_type_survives_structured_null(
+    text: str,
+    expected_type: str,
+) -> None:
+    deterministic = DeterministicIntakeParser().parse(text)
+    merged = merge_intake_candidates(deterministic, IntakeFieldUpdate())
+
+    assert deterministic.values["procurement_type"] == expected_type
+    assert deterministic.evidence_by_field["procurement_type"]
+    assert merged.values["procurement_type"] == expected_type
+
+
+def test_explicit_deterministic_procurement_type_survives_provider_failure() -> None:
+    raw = RawApprovalExtraction()
+    _, provider, adapter = _adapter(raw, error=RuntimeError("provider unavailable"))
+
+    outcome = adapter.handle_text(
+        USER_ID,
+        1001,
+        699,
+        "Профилактическое обслуживание трёх погрузчиков",
+    )
+
+    assert provider.calls == 1
+    assert outcome.result.intake_result.draft.procurement_type == "service"
+    assert outcome.result.intake_result.next_question.field_code != "procurement_type"
+
+
+def test_service_type_survives_successful_structured_null_in_full_adapter() -> None:
+    _, provider, adapter = _adapter(RawApprovalExtraction())
+
+    outcome = adapter.handle_text(
+        USER_ID,
+        1001,
+        698,
+        "Профилактическое обслуживание трёх погрузчиков",
+    )
+
+    assert provider.calls == 1
+    assert outcome.result.intake_result.draft.procurement_type == "service"
+    assert outcome.result.intake_result.next_question.field_code != "procurement_type"
+
+
+def test_opposite_structured_procurement_type_becomes_clarification() -> None:
+    deterministic = DeterministicIntakeParser().parse("Монтаж оборудования")
+    structured = IntakeFieldUpdate(
+        values={"procurement_type": "goods"},
+        evidence_by_field={"procurement_type": "оборудования"},
+    )
+
+    merged = merge_intake_candidates(deterministic, structured)
+
+    assert "procurement_type" not in merged.values
+    assert "category_code" not in merged.values
+
+
+def test_same_structured_and_deterministic_procurement_type_is_preserved() -> None:
+    deterministic = DeterministicIntakeParser().parse("Уборка офиса")
+    structured = IntakeFieldUpdate(values={"procurement_type": "service"})
+
+    merged = merge_intake_candidates(deterministic, structured)
+
+    assert merged.values["procurement_type"] == "service"
 
 
 @pytest.mark.parametrize(
