@@ -2,7 +2,7 @@
   "average_chunks_per_document": 8.43,
   "chunk_count": 118,
   "chunk_size_tokens": {
-    "max": 641,
+    "max": 677,
     "median": 112.0,
     "min": 55
   },
@@ -25,18 +25,18 @@
   "errors": 0,
   "five_largest_chunks": [
     {
-      "chunk_id": "6385be1e-fc47-54ea-9283-7480ebd1e9ba",
+      "chunk_id": "5b7cb4b6-bf3b-5aba-a1d6-425897f13934",
       "document_id": "kb-004",
       "document_title": "Классификатор категорий закупок",
       "section_path": "Классификатор категорий закупок",
-      "token_count_estimate": 641
+      "token_count_estimate": 677
     },
     {
-      "chunk_id": "d2646fd7-406d-5e52-a17f-0fff56849f1f",
+      "chunk_id": "6e14e13b-c598-5247-9fae-3afd4e3960d0",
       "document_id": "kb-005",
       "document_title": "Матрица обязательных полей",
       "section_path": "Матрица обязательных полей > Категориальные поля",
-      "token_count_estimate": 536
+      "token_count_estimate": 555
     },
     {
       "chunk_id": "c4573c54-70aa-5eef-9844-783b69441d8d",

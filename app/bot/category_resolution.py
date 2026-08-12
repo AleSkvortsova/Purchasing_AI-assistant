@@ -1,7 +1,10 @@
 import json
+import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
+from time import perf_counter
 from typing import Literal, Protocol
 
 from openai import OpenAI
@@ -18,6 +21,9 @@ from app.intake.field_registry import (
     CATEGORY_NAMES,
     CATEGORY_TAXONOMY_VERSION,
 )
+from app.intake.models import IntakeFieldUpdate, RequestDraftData
+
+logger = logging.getLogger(__name__)
 
 CategoryDecision = Literal["exact", "candidates", "unresolved"]
 ResolutionDecision = Literal[
@@ -88,6 +94,91 @@ class CategoryClassificationRequest:
     taxonomy: tuple[CategoryTaxonomyItem, ...]
 
 
+@dataclass(frozen=True)
+class CategoryResolutionContext:
+    """PII-minimised semantic input assembled from the canonical draft."""
+
+    procurement_type: Literal["goods", "service"]
+    item_name: str
+    description: str | None = None
+    specifications: str | None = None
+    desired_result: str | None = None
+    business_purpose: str | None = None
+    current_subject_text: str | None = None
+
+    @property
+    def source_text(self) -> str:
+        values = (
+            self.item_name,
+            self.description,
+            self.specifications,
+            self.desired_result,
+            self.business_purpose,
+            self.current_subject_text,
+        )
+        unique: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not value:
+                continue
+            compact = " ".join(value.split())
+            normalized = _normalize(compact)
+            if normalized and normalized not in seen:
+                unique.append(compact)
+                seen.add(normalized)
+        return ". ".join(unique)
+
+    @property
+    def fingerprint(self) -> str:
+        normalized = _normalize(self.source_text)
+        return sha256(
+            f"{self.procurement_type}:{normalized}".encode()
+        ).hexdigest()[:16]
+
+
+def build_category_resolution_context(
+    draft: RequestDraftData | None,
+    update: IntakeFieldUpdate,
+    current_text: str,
+    *,
+    include_current_text: bool,
+) -> CategoryResolutionContext | None:
+    """Build category input from prospective canonical values, not one turn."""
+
+    values = update.values
+    procurement_type = values.get("procurement_type")
+    if procurement_type not in {"goods", "service"} and draft is not None:
+        procurement_type = (
+            draft.procurement_type.value if draft.procurement_type is not None else None
+        )
+    item_name = values.get("item_name")
+    if not isinstance(item_name, str) and draft is not None:
+        item_name = draft.item_name
+    if procurement_type not in {"goods", "service"} or not isinstance(
+        item_name, str
+    ):
+        return None
+
+    def prospective(field_name: str) -> str | None:
+        value = values.get(field_name)
+        if isinstance(value, str):
+            return value
+        if draft is not None:
+            existing = getattr(draft, field_name)
+            return existing if isinstance(existing, str) else None
+        return None
+
+    return CategoryResolutionContext(
+        procurement_type=procurement_type,
+        item_name=item_name,
+        description=prospective("description"),
+        specifications=prospective("specifications"),
+        desired_result=prospective("desired_result"),
+        business_purpose=prospective("business_justification"),
+        current_subject_text=current_text if include_current_text else None,
+    )
+
+
 class CategoryClassificationProvider(Protocol):
     def classify(
         self, request: CategoryClassificationRequest
@@ -105,6 +196,7 @@ class CategoryResolution:
     provider_failed: bool = False
     reason_code: str | None = None
     subject_fingerprint: str | None = None
+    context_fingerprint: str | None = None
 
 
 class OpenAICategoryClassificationProvider:
@@ -136,7 +228,10 @@ class OpenAICategoryClassificationProvider:
             instructions=(
                 "Classify the procurement subject only against allowed_taxonomy. "
                 "Return exact only when one category is clearly supported; return "
-                "candidates for 2-3 plausible categories; otherwise unresolved. "
+                "candidates only with 2-3 plausible alternatives. If exactly one "
+                "category is plausible, use exact and put it in primary_category_code; "
+                "never return candidates with fewer than 2 alternatives. Otherwise "
+                "return unresolved. "
                 "Evidence must be a short verbatim fragment of source_text. Never "
                 "invent codes or return a category of another procurement type."
             ),
@@ -189,7 +284,10 @@ class CategoryResolutionService:
         procurement_type: Literal["goods", "service"],
         item_name: str,
         source_text: str,
+        *,
+        context_fingerprint: str | None = None,
     ) -> CategoryResolution:
+        started = perf_counter()
         combined_text = " ".join(
             value for value in (item_name, source_text) if value
         )
@@ -197,10 +295,8 @@ class CategoryResolutionService:
             combined_text,
             procurement_type,
         )
-        deterministic = self._demote_relational_object_match(
-            deterministic,
-            procurement_type,
-            item_name,
+        deterministic = self._require_item_name_support(
+            deterministic, procurement_type, item_name
         )
         fingerprint = category_subject_fingerprint(procurement_type, item_name)
         if deterministic.kind == "exact" and deterministic.category_code:
@@ -209,6 +305,7 @@ class CategoryResolutionService:
                 category_code=deterministic.category_code,
                 candidate_source="classifier_exact",
                 subject_fingerprint=fingerprint,
+                context_fingerprint=context_fingerprint,
             )
         if deterministic.candidates:
             return CategoryResolution(
@@ -217,12 +314,14 @@ class CategoryResolutionService:
                 candidate_source="classifier_multiple",
                 requires_confirmation=True,
                 subject_fingerprint=fingerprint,
+                context_fingerprint=context_fingerprint,
             )
         if self._provider is None:
             return CategoryResolution(
                 "unresolved",
                 reason_code="provider_unavailable",
                 subject_fingerprint=fingerprint,
+                context_fingerprint=context_fingerprint,
             )
         request = CategoryClassificationRequest(
             procurement_type=procurement_type,
@@ -231,16 +330,29 @@ class CategoryResolutionService:
             taxonomy_version=CATEGORY_TAXONOMY_VERSION,
             taxonomy=category_taxonomy(procurement_type),
         )
+        raw_decision = "error"
+        raw_codes: tuple[str, ...] = ()
         try:
             payload = self._provider.classify(request)
         except Exception:
-            return CategoryResolution(
+            result = CategoryResolution(
                 "unresolved",
                 provider_called=True,
                 provider_failed=True,
                 reason_code="provider_failure",
                 subject_fingerprint=fingerprint,
+                context_fingerprint=context_fingerprint,
             )
+            self._log_resolution(
+                procurement_type, context_fingerprint, deterministic, raw_decision,
+                raw_codes, result, started,
+            )
+            return result
+        raw_decision = str(getattr(payload, "decision", "malformed"))
+        try:
+            raw_codes = _payload_codes(payload)
+        except (AttributeError, TypeError, ValueError):
+            raw_codes = ()
         try:
             validated = self.validate_provider_payload(
                 procurement_type=procurement_type,
@@ -249,21 +361,62 @@ class CategoryResolutionService:
                 payload=payload,
             )
         except (AttributeError, TypeError, ValueError):
-            return CategoryResolution(
+            result = CategoryResolution(
                 "unresolved",
                 provider_called=True,
                 reason_code="malformed_provider_result",
                 subject_fingerprint=fingerprint,
+                context_fingerprint=context_fingerprint,
             )
-        return CategoryResolution(
+            self._log_resolution(
+                procurement_type, context_fingerprint, deterministic, raw_decision,
+                raw_codes, result, started,
+            )
+            return result
+        result = CategoryResolution(
             **{
                 **validated.__dict__,
                 "provider_called": True,
                 "subject_fingerprint": fingerprint,
+                "context_fingerprint": context_fingerprint,
             }
         )
+        self._log_resolution(
+            procurement_type, context_fingerprint, deterministic, raw_decision,
+            raw_codes, result, started,
+        )
+        return result
 
-    def _demote_relational_object_match(
+    @staticmethod
+    def _log_resolution(
+        procurement_type: str,
+        context_fingerprint: str | None,
+        deterministic: CategoryClassification,
+        raw_decision: str,
+        raw_codes: tuple[str, ...],
+        result: CategoryResolution,
+        started: float,
+    ) -> None:
+        logger.info(
+            "Category resolution type=%s context_fingerprint=%s "
+            "taxonomy_version=%s deterministic=%s provider_called=%s "
+            "raw_decision=%s raw_codes=%s validated_decision=%s "
+            "reason_code=%s candidate_codes=%s latency_ms=%s",
+            procurement_type,
+            context_fingerprint,
+            CATEGORY_TAXONOMY_VERSION,
+            deterministic.kind,
+            result.provider_called,
+            raw_decision,
+            raw_codes,
+            result.decision,
+            result.reason_code,
+            result.candidates
+            or ((result.category_code,) if result.category_code else ()),
+            int((perf_counter() - started) * 1000),
+        )
+
+    def _require_item_name_support(
         self,
         classification: CategoryClassification,
         procurement_type: Literal["goods", "service"],
@@ -271,11 +424,14 @@ class CategoryResolutionService:
     ) -> CategoryClassification:
         if classification.kind != "exact":
             return classification
-        head = re.split(r"\b(?:для|под|к)\b", item_name, maxsplit=1, flags=re.I)[0]
-        if head.strip() == item_name.strip() or not head.strip():
-            return classification
-        head_classification = self._classifier.classify(head, procurement_type)
-        if head_classification.kind == "none":
+        subject = re.split(
+            r"\b(?:для|под|к)\b", item_name, maxsplit=1, flags=re.IGNORECASE
+        )[0].strip()
+        item_classification = self._classifier.classify(subject, procurement_type)
+        if (
+            item_classification.kind != "exact"
+            or item_classification.category_code != classification.category_code
+        ):
             return CategoryClassification("none")
         return classification
 
@@ -337,10 +493,8 @@ def category_taxonomy(
 
 
 def category_subject_fingerprint(procurement_type: str, item_name: str) -> str:
-    import hashlib
-
     normalized = _normalize(item_name)
-    return hashlib.sha256(
+    return sha256(
         f"{procurement_type}:{normalized}".encode()
     ).hexdigest()[:16]
 

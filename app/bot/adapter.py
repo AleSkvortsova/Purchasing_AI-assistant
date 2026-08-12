@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Protocol
@@ -13,6 +14,7 @@ from app.bot.categories import (
 from app.bot.category_resolution import (
     CategoryResolution,
     CategoryResolutionService,
+    build_category_resolution_context,
     category_subject_fingerprint,
 )
 from app.bot.decomposition import decompose_procurement_needs
@@ -67,7 +69,7 @@ from app.extraction.intake import (
     TelegramExtractionMode,
     TelegramIntakeExtractionService,
 )
-from app.intake.field_registry import CATEGORY_NAMES
+from app.intake.field_registry import CATEGORY_NAMES, CATEGORY_TAXONOMY_VERSION
 from app.intake.models import IntakeFieldUpdate, IntakeStatus, UpdateSource
 from app.intake_persistence.exceptions import (
     ActiveDraftNotFoundError,
@@ -412,16 +414,19 @@ class TelegramIntakeAdapter:
             raise
         except TelegramParseError:
             if question is not None and question.field_code == "category_code":
-                return self._category_parse_failure(
-                    context,
-                    active,
-                    key,
-                    message_id,
-                    category_candidates,
-                )
-            if not use_structured:
-                raise
-            update = IntakeFieldUpdate()
+                if not use_structured:
+                    return self._category_parse_failure(
+                        context,
+                        active,
+                        key,
+                        message_id,
+                        category_candidates,
+                    )
+                update = self._parser.parse(text)
+            else:
+                if not use_structured:
+                    raise
+                update = IntakeFieldUpdate()
         proposed_category = update.values.get("category_code")
         if isinstance(proposed_category, str) and active is not None:
             selected_option = next(
@@ -578,9 +583,46 @@ class TelegramIntakeAdapter:
             should_resolve=(
                 original_missing
                 or editing
-                or bool({"item_name", "procurement_type"} & set(update.values))
+                or bool(
+                    {
+                        "item_name",
+                        "procurement_type",
+                        "description",
+                        "specifications",
+                        "desired_result",
+                        "business_justification",
+                    }
+                    & set(update.values)
+                )
             ),
         )
+        if category_resolution is not None:
+            self._debug_event(
+                key,
+                "category_resolution",
+                procurement_type=(
+                    update.values.get("procurement_type")
+                    or (
+                        active.intake_result.draft.procurement_type.value
+                        if active is not None
+                        and active.intake_result.draft.procurement_type is not None
+                        else None
+                    )
+                ),
+                context_fingerprint=category_resolution.context_fingerprint,
+                taxonomy_version=CATEGORY_TAXONOMY_VERSION,
+                provider_called=category_resolution.provider_called,
+                validated_decision=category_resolution.decision,
+                reason_code=category_resolution.reason_code,
+                candidate_codes=(
+                    category_resolution.candidates
+                    or (
+                        (category_resolution.category_code,)
+                        if category_resolution.category_code
+                        else ()
+                    )
+                ),
+            )
         if (
             category_resolution is not None
             and category_resolution.decision == "deterministic_exact"
@@ -670,6 +712,9 @@ class TelegramIntakeAdapter:
                 category_subject_fingerprint=(
                     category_resolution.subject_fingerprint
                 ),
+                category_context_fingerprint=(
+                    category_resolution.context_fingerprint
+                ),
                 category_decomposition_fingerprint=decomposition_fingerprint,
                 decomposition_fingerprint=decomposition_fingerprint,
                 category_step_id=f"category-llm:{key}",
@@ -706,6 +751,9 @@ class TelegramIntakeAdapter:
                 category_subject_fingerprint=(
                     category_resolution.subject_fingerprint
                 ),
+                category_context_fingerprint=(
+                    category_resolution.context_fingerprint
+                ),
                 category_decomposition_fingerprint=decomposition_fingerprint,
                 decomposition_fingerprint=decomposition_fingerprint,
                 category_step_id=f"category-deterministic:{key}",
@@ -724,7 +772,32 @@ class TelegramIntakeAdapter:
             category_resolution is not None
             and category_resolution.decision == "unresolved"
         ):
-            intake_conversation = IntakeConversationState()
+            intake_conversation = IntakeConversationState(
+                category_procurement_type=(
+                    update.values.get("procurement_type")
+                    if update.values.get("procurement_type") in {"goods", "service"}
+                    else (
+                        active.intake_result.draft.procurement_type.value
+                        if active is not None
+                        and active.intake_result.draft.procurement_type is not None
+                        else None
+                    )
+                ),
+                category_subject_fingerprint=(
+                    category_resolution.subject_fingerprint
+                ),
+                category_context_fingerprint=(
+                    category_resolution.context_fingerprint
+                ),
+                category_step_id=f"category-unresolved:{key}",
+                original_description=(
+                    active.dialog_state.intake_conversation.original_description
+                    if active is not None
+                    and active.dialog_state.intake_conversation.original_description
+                    else text
+                ),
+                reason_code="category_candidates_missing",
+            )
             category_response = _format_category_candidates(())
         if category_resolution is None and "category_code" in update.values:
             if (
@@ -1512,21 +1585,29 @@ class TelegramIntakeAdapter:
     ) -> CategoryResolution | None:
         if not should_resolve or self._category_resolver is None:
             return None
-        procurement_type = update.values.get("procurement_type")
-        if procurement_type not in {"goods", "service"} and active is not None:
-            current_type = active.intake_result.draft.procurement_type
-            procurement_type = current_type.value if current_type is not None else None
-        item_name = update.values.get("item_name")
-        if not isinstance(item_name, str) and active is not None:
-            item_name = active.intake_result.draft.item_name
-        if procurement_type not in {"goods", "service"} or not isinstance(
-            item_name, str
+        previous = (
+            active.dialog_state.intake_conversation if active is not None else None
+        )
+        include_current = _category_relevant_reply(source_text)
+        context = build_category_resolution_context(
+            active.intake_result.draft if active is not None else None,
+            update,
+            source_text,
+            include_current_text=include_current,
+        )
+        if context is None:
+            return None
+        if (
+            previous is not None
+            and previous.category_context_fingerprint == context.fingerprint
+            and previous.reason_code == "category_candidates_missing"
         ):
             return None
         return self._category_resolver.resolve(
-            procurement_type,
-            item_name,
-            source_text,
+            context.procurement_type,
+            context.item_name,
+            context.source_text,
+            context_fingerprint=context.fingerprint,
         )
 
     def _handle_llm_category_confirmation(
@@ -2130,6 +2211,8 @@ class TelegramIntakeAdapter:
                 if active.intake_result.draft.procurement_type is not None
                 else None
             ),
+            category_subject_fingerprint=previous.category_subject_fingerprint,
+            category_context_fingerprint=previous.category_context_fingerprint,
             category_decomposition_fingerprint=(
                 previous.decomposition_fingerprint
             ),
@@ -2167,7 +2250,7 @@ class TelegramIntakeAdapter:
         if question is None:
             return False
         if question.field_code == "category_code":
-            return False
+            return _category_relevant_reply(text)
         if question.question_type == "free_text":
             return True
         return len(text.split()) >= 5
@@ -2193,6 +2276,23 @@ def _safe_scalar_values(update: IntakeFieldUpdate) -> dict[str, object]:
         for field_name, value in update.values.items()
         if field_name in _DEBUG_SCALAR_FIELDS
     }
+
+
+def _category_relevant_reply(text: str) -> bool:
+    """Exclude scalar/administrative replies from category retries."""
+    normalized = " ".join(text.casefold().replace("ё", "е").split())
+    if not normalized or _category_help_requested(text):
+        return False
+    if re.fullmatch(r"[\d\s.,]+(?:р|руб(?:лей)?|тыс\.?)?", normalized):
+        return False
+    if re.fullmatch(
+        r"(?:да|нет|предусмотрена|не предусмотрена|не знаю)(?: бюджетом)?",
+        normalized,
+    ):
+        return False
+    if re.fullmatch(r"(?:до|к)?\s*\d{1,2}\s+[а-я]+", normalized):
+        return False
+    return len(re.findall(r"[а-яa-z]+", normalized)) >= 3
 
 
 def _category_help_requested(text: str) -> bool:

@@ -670,6 +670,22 @@ def test_explicit_deterministic_procurement_type_survives_provider_failure() -> 
     assert outcome.result.intake_result.next_question.field_code != "procurement_type"
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "нужны 2 роутера для установки на складе",
+        "нужны 7 мониторов для установки в новом офисе",
+    ),
+)
+def test_relational_installation_purpose_is_not_deterministic_service(
+    text: str,
+) -> None:
+    update = DeterministicIntakeParser().parse(text)
+
+    assert "procurement_type" not in update.values
+    assert "category_code" not in update.values
+
+
 def test_service_type_survives_successful_structured_null_in_full_adapter() -> None:
     _, provider, adapter = _adapter(RawApprovalExtraction())
 

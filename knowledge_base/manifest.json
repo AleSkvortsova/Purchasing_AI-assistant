@@ -42,10 +42,10 @@
     "filename": "04_Классификатор_категорий_закупок.md",
     "owner": "Отдел закупок",
     "priority": 3,
-    "sha256": "2e7d5734dfc7b29727e4304293e8a2ea58ddc5938990d5bf0fe1d6bd7122793a",
+    "sha256": "42f5a0a9906126baac741e4ab13b9b87ea4f52bcef0cca97c0ee4a18d2f391f7",
     "status": "active",
     "title": "Классификатор категорий закупок",
-    "version": "1.0"
+    "version": "1.1"
   },
   {
     "document_id": "kb-005",
@@ -54,7 +54,7 @@
     "filename": "05_Матрица_обязательных_полей.md",
     "owner": "Отдел закупок",
     "priority": 2,
-    "sha256": "ce9361d9b28d830658c097377d911e625d435895091337a45b29944d646a1aab",
+    "sha256": "d71a788062bfe0e824587fcb38cfe249ae22956f18efd6b1c8a31de6e8814f46",
     "status": "active",
     "title": "Матрица обязательных полей",
     "version": "1.0"

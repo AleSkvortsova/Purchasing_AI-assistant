@@ -7,6 +7,7 @@ from uuid import UUID
 import app.bot.__main__ as bot_main
 from app.bot.category_resolution import (
     CategoryClassificationPayload,
+    CategoryClassificationRequest,
     FakeCategoryClassificationProvider,
     category_subject_fingerprint,
 )
@@ -83,6 +84,21 @@ class SequenceProvider:
         self.last_metadata = {"provider": "production-wiring-fake"}
 
     def extract(self, text: str) -> RawApprovalExtraction:
+        result = self.results[self.calls]
+        self.calls += 1
+        return result.model_copy(deep=True)
+
+
+class SequenceCategoryProvider:
+    def __init__(self, results: list[CategoryClassificationPayload]) -> None:
+        self.results = results
+        self.calls = 0
+        self.requests: list[CategoryClassificationRequest] = []
+
+    def classify(
+        self, request: CategoryClassificationRequest
+    ) -> CategoryClassificationPayload:
+        self.requests.append(request)
         result = self.results[self.calls]
         self.calls += 1
         return result.model_copy(deep=True)
@@ -217,6 +233,194 @@ def test_unknown_category_uses_shared_production_wiring_and_confirmation(
         f"category_support=llm_confirmed:{expected_fingerprint}:G02"
     )
     assert category_provider.calls == 1
+
+
+def test_router_type_reply_resolves_category_from_accumulated_subject(
+    monkeypatch,
+) -> None:
+    provider = SequenceProvider(
+        [
+            _raw(
+                item_name_raw="роутеры",
+                quantity_raw="2",
+                evidence_by_field={
+                    "item_name": "роутера",
+                    "quantity": "2 роутера",
+                },
+            ),
+            _raw(
+                procurement_type_raw="goods",
+                evidence_by_field={"procurement_type": "товар"},
+            ),
+        ]
+    )
+    category_provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code="G04",
+            alternatives=[],
+            confidence="high",
+            evidence="роутеры",
+            rationale_code="taxonomy_match",
+        )
+    )
+    dependencies, _ = _build(monkeypatch, provider, category_provider)
+
+    first = FakeMessage("нужны 2 роутера для установки на складе", 910)
+    asyncio.run(handle_text_message(first, dependencies))
+    initial = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+    assert "роутер" in (initial.intake_result.draft.item_name or "")
+    assert initial.intake_result.draft.procurement_type is None
+    assert initial.intake_result.next_question.field_code == "procurement_type"
+
+    second = FakeMessage("товар", 911)
+    asyncio.run(handle_text_message(second, dependencies))
+    resolved = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+    request = category_provider.requests[0]
+    assert resolved.intake_result.draft.procurement_type == "goods"
+    assert "роутер" in (resolved.intake_result.draft.item_name or "")
+    assert request.procurement_type == "goods"
+    assert "роутер" in request.item_name
+    assert "роутер" in request.source_text
+    assert request.source_text != "товар"
+    assert "Похоже, подходит категория" in second.answers[0]
+
+
+def test_unresolved_category_retries_when_subject_context_becomes_richer(
+    monkeypatch,
+) -> None:
+    extraction = SequenceProvider(
+        [
+            _raw(
+                procurement_type_raw="goods",
+                item_name_raw="промышленные вентиляторы",
+                evidence_by_field={
+                    "procurement_type": "купите",
+                    "item_name": "промышленных вентилятора",
+                },
+            ),
+            _raw(
+                specifications_raw="для охлаждения помещения в производственном цеху",
+                evidence_by_field={
+                    "specifications": (
+                        "для охлаждения помещения в производственном цеху"
+                    )
+                },
+            ),
+        ]
+    )
+    unresolved = CategoryClassificationPayload(
+        decision="unresolved",
+        primary_category_code=None,
+        alternatives=[],
+        confidence="low",
+        evidence=None,
+        rationale_code="insufficient_context",
+    )
+    exact = CategoryClassificationPayload(
+        decision="exact",
+        primary_category_code="G15",
+        alternatives=[],
+        confidence="high",
+        evidence="для охлаждения помещения",
+        rationale_code="taxonomy_match",
+    )
+    category_provider = SequenceCategoryProvider([unresolved, exact])
+    dependencies, _ = _build(monkeypatch, extraction, category_provider)
+
+    first = FakeMessage("купите 3 промышленных вентилятора в производственный цех", 920)
+    asyncio.run(handle_text_message(first, dependencies))
+    after_first = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+    first_fingerprint = (
+        after_first.dialog_state.intake_conversation.category_context_fingerprint
+    )
+    second = FakeMessage(
+        "промышленные вентиляторы для охлаждения помещения в производственном цеху",
+        921,
+    )
+    asyncio.run(handle_text_message(second, dependencies))
+    after_second = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert category_provider.calls == 2
+    assert first_fingerprint
+    assert (
+        after_second.dialog_state.intake_conversation.category_context_fingerprint
+        != first_fingerprint
+    )
+    assert "для охлаждения помещения" in category_provider.requests[1].source_text
+    assert "Похоже, подходит категория" in second.answers[0]
+
+
+def test_scalar_replies_do_not_retry_unresolved_category_provider(monkeypatch) -> None:
+    extraction = SequenceProvider(
+        [
+            _raw(
+                procurement_type_raw="goods",
+                item_name_raw="промышленные вентиляторы",
+                evidence_by_field={
+                    "procurement_type": "купите",
+                    "item_name": "промышленных вентилятора",
+                },
+            )
+        ]
+    )
+    category_provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="unresolved",
+            primary_category_code=None,
+            alternatives=[],
+            confidence="low",
+            evidence=None,
+            rationale_code="insufficient_context",
+        )
+    )
+    dependencies, _ = _build(monkeypatch, extraction, category_provider)
+    asyncio.run(
+        handle_text_message(
+            FakeMessage("купите 3 промышленных вентилятора", 930), dependencies
+        )
+    )
+
+    replies = ("80000р", "да, предусмотрена", "15 сентября")
+    for message_id, text in enumerate(replies, 931):
+        message = FakeMessage(text, message_id)
+        asyncio.run(handle_text_message(message, dependencies))
+
+    assert category_provider.calls == 1
+
+
+def test_monitor_structured_goods_survives_merge_and_persistence(monkeypatch) -> None:
+    text = "нужны 7 мониторов для установки в новом офисе"
+    provider = SequenceProvider(
+        [
+            _raw(
+                procurement_type_raw="goods",
+                item_name_raw="мониторы",
+                quantity_raw="7",
+                evidence_by_field={
+                    "procurement_type": "мониторов",
+                    "item_name": "мониторов",
+                    "quantity": "7 мониторов",
+                },
+            )
+        ]
+    )
+    dependencies, repository = _build(monkeypatch, provider)
+    message = FakeMessage(text, 940)
+
+    asyncio.run(handle_text_message(message, dependencies))
+    persisted = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert persisted.intake_result.draft.procurement_type == "goods"
+    assert persisted.intake_result.draft.item_name == "мониторы"
+    assert persisted.intake_result.next_question.field_code != "procurement_type"
+    reloaded_dependencies, _ = _build(monkeypatch, SequenceProvider([]))
+    reloaded_dependencies.intake_adapter._orchestrator.repository = repository
+    reloaded = reloaded_dependencies.intake_adapter._orchestrator.get_active_session(
+        USER_ID
+    )
+    assert reloaded.intake_result.draft.procurement_type == "goods"
+    assert reloaded.intake_result.draft.item_name == "мониторы"
 
 
 def _raw(**values) -> RawApprovalExtraction:

@@ -12,15 +12,17 @@ from app.bot.category_resolution import (
     CategoryClassificationPayload,
     CategoryResolutionService,
     FakeCategoryClassificationProvider,
+    build_category_resolution_context,
     category_classification_strict_json_schema,
     category_subject_fingerprint,
     validate_category_classification_schema,
 )
 from app.intake.field_registry import (
     CATEGORY_DESCRIPTIONS,
+    CATEGORY_NAMES,
     CATEGORY_TAXONOMY_VERSION,
 )
-from app.intake.models import IntakeFieldUpdate
+from app.intake.models import IntakeFieldUpdate, RequestDraftData
 from app.intake_persistence.repositories import (
     InMemoryIntakePersistenceRepository,
     InMemoryIntakeStorage,
@@ -244,7 +246,7 @@ def test_general_or_semantically_different_evidence_is_rejected(
 
 
 def test_s01_and_s15_taxonomy_metadata_describes_semantic_boundary() -> None:
-    assert CATEGORY_TAXONOMY_VERSION == "intake-categories-v2"
+    assert CATEGORY_TAXONOMY_VERSION == "intake-categories-v3"
     assert "восстановление работоспособности" in CATEGORY_DESCRIPTIONS["S01"]
     assert "метрологические" in CATEGORY_DESCRIPTIONS["S15"]
     assert "не являются ремонтом" in CATEGORY_DESCRIPTIONS["S15"]
@@ -348,6 +350,136 @@ def test_malformed_provider_object_degrades_to_unresolved() -> None:
 
     assert result.decision == "unresolved"
     assert result.reason_code == "malformed_provider_result"
+
+
+def test_category_context_uses_only_category_relevant_canonical_fields() -> None:
+    draft = RequestDraftData(
+        procurement_type="goods",
+        item_name="роутеры",
+        description="оборудование для склада",
+        specifications="доступ к интернету от провайдера",
+        business_justification="обеспечить работу склада",
+        amount="80000",
+        budget_status="budgeted",
+        delivery_location="склад на Невском",
+        department="Логистика",
+    )
+    context = build_category_resolution_context(
+        draft,
+        IntakeFieldUpdate(),
+        "15 сентября",
+        include_current_text=False,
+    )
+
+    assert context is not None
+    assert "роутеры" in context.source_text
+    assert "доступ к интернету" in context.source_text
+    assert "обеспечить работу склада" in context.source_text
+    assert "80000" not in context.source_text
+    assert "budgeted" not in context.source_text
+    assert "Невском" not in context.source_text
+    assert "Логистика" not in context.source_text
+
+
+def test_category_context_fingerprint_changes_only_for_semantic_context() -> None:
+    draft = RequestDraftData(procurement_type="goods", item_name="вентиляторы")
+    original = build_category_resolution_context(
+        draft,
+        IntakeFieldUpdate(),
+        "80000р",
+        include_current_text=False,
+    )
+    enriched = build_category_resolution_context(
+        draft,
+        IntakeFieldUpdate(
+            values={"specifications": "для охлаждения производственного помещения"}
+        ),
+        "для охлаждения производственного помещения",
+        include_current_text=True,
+    )
+
+    assert original is not None and enriched is not None
+    assert original.fingerprint != enriched.fingerprint
+
+
+def test_taxonomy_covers_it_infrastructure_by_purpose() -> None:
+    assert CATEGORY_TAXONOMY_VERSION == "intake-categories-v3"
+    assert "инфраструктур" in CATEGORY_DESCRIPTIONS["G03"].casefold()
+    assert "сетев" in CATEGORY_DESCRIPTIONS["G03"].casefold()
+    assert "рабоч" in CATEGORY_DESCRIPTIONS["G04"].casefold()
+
+
+def test_taxonomy_distinguishes_engineering_equipment_and_parts() -> None:
+    description = CATEGORY_DESCRIPTIONS["G15"].casefold()
+
+    assert "самостоятельн" in description
+    assert "оборудован" in description
+    assert "запчаст" in description
+    assert CATEGORY_NAMES["G15"] == "Инженерное оборудование и запчасти"
+    assert "не являющиеся самостоятельным" in CATEGORY_DESCRIPTIONS[
+        "G14"
+    ].casefold()
+
+
+@pytest.mark.parametrize(
+    ("item_name", "source_text", "provider_code"),
+    (
+        ("роутер", "роутер для сети офиса", "G03"),
+        ("точка доступа", "точка доступа для беспроводной сети", "G03"),
+        ("сетевой коммутатор", "сетевой коммутатор инфраструктуры", "G03"),
+        ("промышленный вентилятор", "оборудование охлаждения цеха", "G15"),
+        ("насос", "самостоятельный промышленный насос", "G15"),
+        ("компрессор", "компрессор производственной линии", "G15"),
+        ("осушитель воздуха", "осушитель производственного помещения", "G15"),
+        ("запасная деталь", "деталь промышленного оборудования", "G15"),
+    ),
+)
+def test_semantic_taxonomy_accepts_infrastructure_and_engineering_classes(
+    item_name: str,
+    source_text: str,
+    provider_code: str,
+) -> None:
+    provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code=provider_code,
+            alternatives=[],
+            confidence="high",
+            evidence=source_text,
+            rationale_code="taxonomy_match",
+        )
+    )
+    result = CategoryResolutionService(provider=provider).resolve(
+        "goods", item_name, source_text
+    )
+
+    if result.decision == "deterministic_exact":
+        assert result.category_code == provider_code
+    else:
+        assert result.decision == "llm_exact"
+        assert result.candidates == (provider_code,)
+
+
+def test_related_object_does_not_create_deterministic_category_shortcut() -> None:
+    provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code="G04",
+            alternatives=[],
+            confidence="high",
+            evidence="док-станция",
+            rationale_code="taxonomy_match",
+        )
+    )
+    result = CategoryResolutionService(provider=provider).resolve(
+        "goods",
+        "док-станция",
+        "док-станция для рабочего ноутбука",
+    )
+
+    assert provider.calls == 1
+    assert result.decision == "llm_exact"
+    assert result.candidates == ("G04",)
 
 
 def test_category_schema_is_strict_and_closed() -> None:

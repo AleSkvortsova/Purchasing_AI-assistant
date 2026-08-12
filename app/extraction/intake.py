@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -23,6 +24,8 @@ from app.intake.models import (
     RequestDraftData,
     UpdateSource,
 )
+
+logger = logging.getLogger(__name__)
 
 TelegramExtractionMode = Literal["rule", "openai", "hybrid", "fake"]
 TELEGRAM_INTAKE_PROMPT_VERSION = "approval-context+telegram-intake-v1"
@@ -157,6 +160,24 @@ class TelegramIntakeExtractionService:
                     "corrections": deterministic.corrections,
                 }
             )
+        )
+        deterministic_type = deterministic.values.get("procurement_type")
+        structured_type = structured.update.values.get("procurement_type")
+        merged_type = update.values.get("procurement_type")
+        reason = (
+            "deterministic_structured_conflict"
+            if deterministic_type in {"goods", "service"}
+            and structured_type in {"goods", "service"}
+            and deterministic_type != structured_type
+            else "accepted"
+        )
+        logger.info(
+            "Telegram procurement type resolution deterministic_type=%s "
+            "structured_type=%s merged_type=%s reason_code=%s",
+            deterministic_type,
+            structured_type,
+            merged_type,
+            reason,
         )
         return ResolvedIntakeExtraction(
             update=update,

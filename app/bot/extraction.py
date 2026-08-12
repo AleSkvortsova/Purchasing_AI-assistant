@@ -110,6 +110,7 @@ class DeterministicEntityExtractor:
             original, self._dates
         )
         category = self._categories.classify(original)
+        category = self._demote_relational_service_category(original, category)
         procurement_type, procurement_type_evidence = self._procurement_type(
             original,
             category.category_code,
@@ -183,6 +184,25 @@ class DeterministicEntityExtractor:
             tuple(sorted(suppressed)),
         )
 
+    def _demote_relational_service_category(
+        self,
+        text: str,
+        category,
+    ):
+        if (
+            category.kind != "exact"
+            or not category.category_code
+            or not category.category_code.startswith("S")
+        ):
+            return category
+        head = re.split(r"\bдля\s+", text, maxsplit=1, flags=re.IGNORECASE)[0]
+        if head.strip() == text.strip() or not head.strip():
+            return category
+        head_category = self._categories.classify(head)
+        if head_category.kind == "none":
+            return head_category
+        return category
+
     @staticmethod
     def _procurement_type(
         text: str,
@@ -201,7 +221,9 @@ class DeterministicEntityExtractor:
             r"помыть|мыть|мойк)\w*",
             normalized,
         )
-        if service is not None:
+        if service is not None and not normalized[
+            max(0, service.start() - 5) : service.start()
+        ].endswith("для "):
             return "service", text[service.start() : service.end()]
         if category_code:
             return (
