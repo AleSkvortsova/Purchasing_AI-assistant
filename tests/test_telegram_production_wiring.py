@@ -5,6 +5,11 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import app.bot.__main__ as bot_main
+from app.bot.category_resolution import (
+    CategoryClassificationPayload,
+    FakeCategoryClassificationProvider,
+    category_subject_fingerprint,
+)
 from app.bot.dialog_modes import InMemoryDialogModeRepository
 from app.bot.formatters import format_request_card
 from app.bot.handlers import handle_text_message
@@ -83,7 +88,11 @@ class SequenceProvider:
         return result.model_copy(deep=True)
 
 
-def _build(monkeypatch, provider: SequenceProvider):
+def _build(
+    monkeypatch,
+    provider: SequenceProvider,
+    category_provider: FakeCategoryClassificationProvider | None = None,
+):
     repository = InMemoryIntakePersistenceRepository()
     monkeypatch.setattr(bot_main, "create_client", lambda *_: object())
     monkeypatch.setattr(
@@ -117,6 +126,23 @@ def _build(monkeypatch, provider: SequenceProvider):
         "OpenAIApprovalExtractionProvider",
         lambda **_kwargs: provider,
     )
+    current_category_provider = category_provider or (
+        FakeCategoryClassificationProvider(
+            CategoryClassificationPayload(
+                decision="unresolved",
+                primary_category_code=None,
+                alternatives=[],
+                confidence="low",
+                evidence=None,
+                rationale_code="insufficient_context",
+            )
+        )
+    )
+    monkeypatch.setattr(
+        bot_main,
+        "OpenAICategoryClassificationProvider",
+        lambda **_kwargs: current_category_provider,
+    )
     monkeypatch.setattr(
         bot_main,
         "SupabaseDialogModeRepository",
@@ -136,6 +162,61 @@ def _build(monkeypatch, provider: SequenceProvider):
         date_parser=NaturalDateParser(today_provider=lambda: REFERENCE_DATE),
     )
     return dependencies, repository
+
+
+def test_unknown_category_uses_shared_production_wiring_and_confirmation(
+    monkeypatch,
+) -> None:
+    text = "Нужно купить 5 офисных стульев для переговорной"
+    raw = _raw(
+        procurement_type_raw="goods",
+        item_name_raw="офисные стулья",
+        quantity_raw="5",
+        unit_raw="шт.",
+        category_raw="G02",
+        evidence_by_field={
+            "procurement_type": "купить",
+            "item_name": "офисных стульев",
+            "quantity": "5 офисных стульев",
+            "unit": "5 офисных стульев",
+            "category": "офисных стульев",
+        },
+    )
+    category_provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code="G02",
+            alternatives=[],
+            confidence="high",
+            evidence="офисных стульев",
+            rationale_code="taxonomy_match",
+        )
+    )
+    dependencies, _ = _build(
+        monkeypatch,
+        SequenceProvider([raw]),
+        category_provider,
+    )
+    initial = FakeMessage(text, 900)
+
+    asyncio.run(handle_text_message(initial, dependencies))
+
+    proposed = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+    assert proposed.intake_result.draft.category_code is None
+    assert "Похоже, подходит категория" in initial.answers[0]
+    confirmed_message = FakeMessage("да", 901)
+    asyncio.run(handle_text_message(confirmed_message, dependencies))
+    confirmed = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+    assert confirmed.intake_result.draft.category_code == "G02"
+    expected_fingerprint = category_subject_fingerprint(
+        "goods", confirmed.intake_result.draft.item_name or ""
+    )
+    assert confirmed.intake_result.draft.field_states[
+        "category_code"
+    ].evidence == (
+        f"category_support=llm_confirmed:{expected_fingerprint}:G02"
+    )
+    assert category_provider.calls == 1
 
 
 def _raw(**values) -> RawApprovalExtraction:

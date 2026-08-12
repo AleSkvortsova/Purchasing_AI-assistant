@@ -128,6 +128,32 @@ structured null, rejection и provider fallback. Совпадающий structur
 Generic fallback и legacy option без provenance считаются weak и не доказывают
 совместимость категории.
 
+Для предметов вне deterministic vocabulary category resolution использует
+безопасный второй уровень: отдельный strict Structured Output вызывается через
+тот же экземпляр OpenAI client, что и основной extraction provider. Модель видит
+только `goods` или `service`, предмет, релевантное описание и закрытую taxonomy
+соответствующего типа. Taxonomy строится из канонического `CATEGORY_NAMES` и
+versioned semantic metadata `intake-categories-v2`; RAG и knowledge index в этом
+решении не участвуют.
+
+`v2` уточняет границу сервисных категорий: S01 охватывает ремонт, монтаж,
+регламентное обслуживание и восстановление работоспособности оборудования;
+S15 — специализированные технические услуги, которые не являются такими
+работами, включая метрологию, поверку, калибровку, испытания и экспертизу.
+Это семантическое описание taxonomy, а не deterministic словарь предметов.
+
+Evidence категории сначала проверяется как нормализованный фрагмент, а затем —
+как непрерывная последовательность тех же содержательных токенов с безопасным
+лёгким stemming русских окончаний. Одного общего слова недостаточно: изменение
+предметного смысла по-прежнему приводит к `invalid_evidence`.
+
+Решение `llm_exact` или `llm_candidates` сохраняется только в
+`dialog_states.state_data` и не заполняет draft. После явного выбора поле получает
+provenance `llm_confirmed`, связанный с fingerprint `procurement_type + item_name`
+и выбранным кодом. Completeness и lifecycle повторно проверяют этот fingerprint.
+Unconfirmed LLM suggestion, malformed/provider failure и generic fallback не дают
+readiness. Изменение предмета или типа делает сохранённые candidates недействующими.
+
 Conversational mode не владеет intake draft. Явный вход в Regulation Q&A
 очищает только старый regulation pending; `/start` переводит mode в `idle` и
 также очищает pending. В обоих случаях `active_request_id` и canonical draft

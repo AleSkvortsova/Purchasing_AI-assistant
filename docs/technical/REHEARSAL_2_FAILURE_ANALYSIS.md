@@ -783,3 +783,33 @@ hashed correlation ID — без текста, PII, chunks, prompt и provider r
 исправленные amount forms, обнаружение конкретного mixed-сценария, очевидный
 OOD refusal, urgency answer и отсутствие видимых инфраструктурных сбоев в
 предоставленной выдержке.
+
+## Follow-up: category generalization после P0-D
+
+Production smoke после P0-D подтвердил отдельный coverage gap: «офисные стулья»
+не входили в deterministic G02 vocabulary. До P0-D это маскировал общий fallback
+G01–G04; после его правильного удаления категория безопасно оставалась unresolved.
+
+Follow-up реализован без возврата fallback и без расширения regex-каталога каждым
+новым предметом. После deterministic `none` применяется strict closed-taxonomy
+provider на общем OpenAI client. Его exact/candidate результат не попадает в draft
+до явного подтверждения. Candidate state хранит provenance, тип и subject
+fingerprint; подтверждённое поле получает `llm_confirmed` с fingerprint и кодом.
+Readiness и lifecycle отклоняют unconfirmed/weak/stale provenance. Ошибка provider
+сохраняет unresolved category и controlled clarification.
+
+Добавлен отдельный offline generalization dataset: офисное оснащение, IT
+accessory, промышленное оборудование, хозяйственный товар, услуга, ambiguous и
+truly unresolved. Knowledge base, embeddings, SQL и migrations для follow-up не
+изменялись. Статус production acceptance этим локальным изменением не повышается.
+
+## Follow-up после real category-provider smoke
+
+Первый real smoke выявил два ограниченных дефекта: literal evidence отклонял
+безопасное русское словоизменение (`настенная`/`настенную`), а metadata недостаточно
+чётко разделяла S01 и S15. Evidence matching переведён на консервативную
+нормализацию с непрерывным token/stem match; совпадение только общих слов остаётся
+недостаточным. Taxonomy metadata повышена с `intake-categories-v1` до
+`intake-categories-v2`: S01 описывает ремонт/монтаж/ТО и восстановление
+работоспособности, S15 — не являющиеся ими метрологические, поверочные,
+калибровочные, испытательные и экспертные услуги. Noun hardcodes не добавлялись.

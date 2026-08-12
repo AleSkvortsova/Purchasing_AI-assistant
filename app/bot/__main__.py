@@ -6,6 +6,10 @@ from openai import OpenAI
 
 from app.bot.adapter import TelegramIntakeAdapter
 from app.bot.categories import DeterministicCategoryClassifier
+from app.bot.category_resolution import (
+    CategoryResolutionService,
+    OpenAICategoryClassificationProvider,
+)
 from app.bot.dialog_modes import SupabaseDialogModeRepository
 from app.bot.handlers import TelegramHandlerDependencies, create_router
 from app.bot.normalization import NaturalDateParser
@@ -74,6 +78,7 @@ def build_dependencies(
     )
     extraction_mode = settings.resolved_telegram_extraction_mode
     structured_extractor = None
+    category_provider = None
     regulation_qa = None
     openai_client = (
         OpenAI(
@@ -99,6 +104,11 @@ def build_dependencies(
             ),
             date_parser=dates,
             min_confidence=settings.approval_extraction_min_confidence,
+        )
+        category_provider = OpenAICategoryClassificationProvider(
+            model=settings.approval_extraction_model,
+            timeout_seconds=settings.approval_extraction_timeout_seconds,
+            client=openai_client,
         )
     if openai_client is not None:
         retrieval = KnowledgeRetrievalService(
@@ -142,6 +152,10 @@ def build_dependencies(
             SupabaseDialogModeRepository(client),
             RequestHistoryService(SupabaseRequestHistoryRepository(client)),
             regulation_qa,
+            category_resolver=CategoryResolutionService(
+                categories,
+                category_provider,
+            ),
         ),
     )
 

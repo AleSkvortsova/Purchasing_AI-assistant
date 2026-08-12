@@ -156,6 +156,8 @@ def _light_russian_stem(value: str) -> str:
         "ой",
         "ое",
         "ее",
+        "ые",
+        "ие",
         "ых",
         "их",
         "ов",

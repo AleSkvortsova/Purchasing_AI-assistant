@@ -1,0 +1,9 @@
+[
+  {"case_id":"office_equipment_footrest","procurement_type":"goods","text":"Нужна эргономичная подставка для ног на рабочее место","provider_decision":"exact","provider_codes":["G02"],"expected_decision":"llm_exact"},
+  {"case_id":"it_accessory_dock","procurement_type":"goods","text":"Нужно приобрести док-станции для рабочих ноутбуков","provider_decision":"exact","provider_codes":["G04"],"expected_decision":"llm_exact"},
+  {"case_id":"industrial_frequency_converter","procurement_type":"goods","text":"Нужен частотный преобразователь для производственной линии","provider_decision":"exact","provider_codes":["G15"],"expected_decision":"llm_exact"},
+  {"case_id":"household_soap_dispenser","procurement_type":"goods","text":"Нужно купить диспенсеры для мыла в санитарные комнаты","provider_decision":"exact","provider_codes":["G09"],"expected_decision":"llm_exact"},
+  {"case_id":"specialist_calibration_service","procurement_type":"service","text":"Требуется поверка измерительных приборов внешним специалистом","provider_decision":"exact","provider_codes":["S15"],"expected_decision":"llm_exact"},
+  {"case_id":"ambiguous_meeting_panel","procurement_type":"goods","text":"Нужна настенная панель для переговорной","provider_decision":"candidates","provider_codes":["G02","G04"],"expected_decision":"llm_candidates"},
+  {"case_id":"truly_unresolved_solution","procurement_type":"service","text":"Нужно специализированное решение для подразделения","provider_decision":"unresolved","provider_codes":[],"expected_decision":"unresolved"}
+]

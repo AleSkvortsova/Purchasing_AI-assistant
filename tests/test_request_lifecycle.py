@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from app.bot.category_resolution import category_subject_fingerprint
 from app.intake.models import IntakeFieldUpdate, IntakeStatus
 from app.intake.service import RequestIntakeService
 from app.intake_persistence.exceptions import ActiveDraftNotFoundError
@@ -250,6 +251,116 @@ def test_unknown_subject_category_cannot_be_confirmed_without_positive_support(
             saved.request_version,
             f"confirm-unsupported-category-{procurement_type}-{category_code}",
         )
+
+
+@pytest.mark.parametrize(
+    "support",
+    ["llm_exact", "llm_candidates", "generic_fallback"],
+)
+def test_unconfirmed_or_weak_category_provenance_cannot_register(
+    support: str,
+) -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values.update(
+        {
+            "item_name": "промышленный вентилятор",
+            "category_code": "G15",
+            "description": "Потребность: промышленный вентилятор",
+        }
+    )
+    update.evidence_by_field["category_code"] = f"category_support={support}"
+    saved = intake.process_structured_step(USER_ID, update)
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+
+    assert "category_code" in saved.intake_result.completeness.invalid_fields
+    assert (
+        lifecycle.get_confirmation_view(saved.request_id, USER_ID).confirmable
+        is False
+    )
+    with pytest.raises(RequestNotReadyError):
+        lifecycle.confirm_request(
+            saved.request_id,
+            USER_ID,
+            saved.request_version,
+            f"confirm-untrusted-{support}",
+        )
+
+
+def test_confirmed_llm_category_provenance_can_register() -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values.update(
+        {
+            "item_name": "промышленный вентилятор",
+            "category_code": "G15",
+            "description": "Потребность: промышленный вентилятор",
+        }
+    )
+    update.evidence_by_field["category_code"] = (
+        "category_support=llm_confirmed:"
+        f"{category_subject_fingerprint('goods', 'промышленный вентилятор')}:G15"
+    )
+    saved = intake.process_structured_step(USER_ID, update)
+    lifecycle = RequestLifecycleService(
+        InMemoryRequestLifecycleRepository(storage), core
+    )
+
+    assert saved.intake_result.status == IntakeStatus.READY_FOR_CONFIRMATION
+    assert (
+        lifecycle.get_confirmation_view(saved.request_id, USER_ID).confirmable
+        is True
+    )
+    registered = lifecycle.confirm_request(
+        saved.request_id,
+        USER_ID,
+        saved.request_version,
+        "confirm-llm-category",
+    )
+    assert registered.status == RequestStatus.NEW
+
+
+def test_confirmed_llm_provenance_is_invalidated_when_subject_changes() -> None:
+    storage = InMemoryIntakeStorage()
+    core = intake_service()
+    intake = PersistentIntakeOrchestrator(
+        InMemoryIntakePersistenceRepository(storage), core
+    )
+    update = full_update()
+    update.values.update(
+        {
+            "item_name": "промышленный вентилятор",
+            "category_code": "G15",
+            "description": "Потребность: промышленный вентилятор",
+        }
+    )
+    fingerprint = category_subject_fingerprint(
+        "goods", "промышленный вентилятор"
+    )
+    update.evidence_by_field["category_code"] = (
+        f"category_support=llm_confirmed:{fingerprint}:G15"
+    )
+    saved = intake.process_structured_step(USER_ID, update)
+    changed = intake.process_structured_step(
+        USER_ID,
+        IntakeFieldUpdate(
+            values={"item_name": "другое неизвестное оборудование"},
+            explicit_correction=True,
+        ),
+        request_id=saved.request_id,
+    )
+
+    assert "category_code" in changed.intake_result.completeness.invalid_fields
 
 
 def test_confirm_registers_snapshot_dialog_logs_and_replay() -> None:

@@ -29,6 +29,9 @@ class CategoryCandidateOption(BaseModel):
         "classifier_exact",
         "classifier_multiple",
         "derived",
+        "llm_exact",
+        "llm_candidates",
+        "llm_confirmed",
         "persisted_strong",
         "generic_fallback",
     ] = "generic_fallback"
@@ -40,6 +43,7 @@ class IntakeConversationState(BaseModel):
     item_candidates: list[ProcurementNeedCandidate] = Field(default_factory=list)
     category_candidates: list[CategoryCandidateOption] = Field(default_factory=list)
     category_procurement_type: Literal["goods", "service"] | None = None
+    category_subject_fingerprint: str | None = None
     category_decomposition_fingerprint: str | None = None
     decomposition_kind: Literal[
         "single_need",
@@ -71,6 +75,7 @@ class IntakeConversationState(BaseModel):
             self.item_candidates
             or self.category_candidates
             or self.category_procurement_type
+            or self.category_subject_fingerprint
             or self.category_decomposition_fingerprint
             or self.decomposition_kind
             or self.decomposition_fingerprint

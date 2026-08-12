@@ -10,6 +10,11 @@ from app.bot.categories import (
     extract_procurement_items,
     normalize_software_scope_reply,
 )
+from app.bot.category_resolution import (
+    CategoryResolution,
+    CategoryResolutionService,
+    category_subject_fingerprint,
+)
 from app.bot.decomposition import decompose_procurement_needs
 from app.bot.dialog_modes import (
     DialogModePersistenceError,
@@ -182,6 +187,7 @@ class TelegramIntakeAdapter:
         dialog_modes: DialogModeRepository | None = None,
         request_history: RequestHistoryService | None = None,
         regulation_qa: RegulationQuestionAnsweringService | None = None,
+        category_resolver: CategoryResolutionService | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._categories = category_classifier or DeterministicCategoryClassifier()
@@ -195,6 +201,7 @@ class TelegramIntakeAdapter:
         self._dialog_modes = dialog_modes or InMemoryDialogModeRepository()
         self._request_history = request_history
         self._regulation_qa = regulation_qa
+        self._category_resolver = category_resolver
         self._extraction_cache: dict[str, IntakeFieldUpdate] = {}
         self._message_outcome_cache: dict[str, TelegramIntakeOutcome] = {}
         self._awaiting_new_request_description: set[UUID] = set()
@@ -365,6 +372,15 @@ class TelegramIntakeAdapter:
                 return split_outcome
         category_candidates = self._category_candidates(active, text)
         if question is not None and question.field_code == "category_code":
+            confirmation_outcome = self._handle_llm_category_confirmation(
+                context,
+                active,
+                key,
+                message_id,
+                text,
+            )
+            if confirmation_outcome is not None:
+                return confirmation_outcome
             category_outcome = self._handle_category_clarification_command(
                 context,
                 active,
@@ -416,15 +432,24 @@ class TelegramIntakeAdapter:
                     )
                     if option.code == proposed_category
                     and option.selectable
-                    and option.readiness_eligible
                 ),
                 None,
             )
             if selected_option is not None:
                 category_evidence = dict(update.evidence_by_field)
-                category_evidence["category_code"] = (
-                    f"category_support={selected_option.source}"
+                support = (
+                    "llm_confirmed"
+                    if selected_option.source in {"llm_exact", "llm_candidates"}
+                    else selected_option.source
                 )
+                if support == "llm_confirmed":
+                    draft = active.intake_result.draft
+                    fingerprint = category_subject_fingerprint(
+                        draft.procurement_type.value,
+                        draft.item_name or "",
+                    )
+                    support = f"{support}:{fingerprint}:{proposed_category}"
+                category_evidence["category_code"] = f"category_support={support}"
                 update = update.model_copy(
                     update={"evidence_by_field": category_evidence}
                 )
@@ -546,6 +571,40 @@ class TelegramIntakeAdapter:
                         rejection_codes=(resolution.failure.validation_error_codes),
                     )
             update = cached
+        category_resolution = self._resolve_category_for_update(
+            update,
+            active,
+            text,
+            should_resolve=(
+                original_missing
+                or editing
+                or bool({"item_name", "procurement_type"} & set(update.values))
+            ),
+        )
+        if (
+            category_resolution is not None
+            and category_resolution.decision == "deterministic_exact"
+            and category_resolution.category_code is not None
+        ):
+            values = dict(update.values)
+            evidence = dict(update.evidence_by_field)
+            values["category_code"] = category_resolution.category_code
+            evidence["category_code"] = "category_support=classifier_exact"
+            update = update.model_copy(
+                update={"values": values, "evidence_by_field": evidence}
+            )
+        if category_resolution is not None and category_resolution.decision in {
+            "llm_exact",
+            "llm_candidates",
+            "unresolved",
+        }:
+            values = dict(update.values)
+            evidence = dict(update.evidence_by_field)
+            values.pop("category_code", None)
+            evidence.pop("category_code", None)
+            update = update.model_copy(
+                update={"values": values, "evidence_by_field": evidence}
+            )
         if (
             not editing
             and question is not None
@@ -581,18 +640,111 @@ class TelegramIntakeAdapter:
             ]:
                 update = update.model_copy(update={"explicit_correction": True})
         intake_conversation = None
-        if "category_code" in update.values:
+        category_response = None
+        if category_resolution is not None and category_resolution.decision in {
+            "llm_exact",
+            "llm_candidates",
+        }:
+            assert category_resolution.candidate_source is not None
+            decomposition_fingerprint = (
+                active.dialog_state.intake_conversation.decomposition_fingerprint
+                if active is not None
+                else None
+            )
+            selected_type = update.values.get("procurement_type")
+            if selected_type not in {"goods", "service"} and active is not None:
+                current_type = active.intake_result.draft.procurement_type
+                selected_type = current_type.value if current_type is not None else None
+            intake_conversation = IntakeConversationState(
+                category_candidates=[
+                    CategoryCandidateOption(
+                        code=code,
+                        label=CATEGORY_NAMES[code],
+                        source=category_resolution.candidate_source,
+                        selectable=True,
+                        readiness_eligible=False,
+                    )
+                    for code in category_resolution.candidates
+                ],
+                category_procurement_type=selected_type,
+                category_subject_fingerprint=(
+                    category_resolution.subject_fingerprint
+                ),
+                category_decomposition_fingerprint=decomposition_fingerprint,
+                decomposition_fingerprint=decomposition_fingerprint,
+                category_step_id=f"category-llm:{key}",
+                original_description=text,
+            )
+            category_response = _format_llm_category_resolution(
+                category_resolution
+            )
+        elif (
+            category_resolution is not None
+            and category_resolution.decision == "deterministic_candidates"
+        ):
+            decomposition_fingerprint = (
+                active.dialog_state.intake_conversation.decomposition_fingerprint
+                if active is not None
+                else None
+            )
+            selected_type = update.values.get("procurement_type")
+            if selected_type not in {"goods", "service"} and active is not None:
+                current_type = active.intake_result.draft.procurement_type
+                selected_type = current_type.value if current_type is not None else None
+            intake_conversation = IntakeConversationState(
+                category_candidates=[
+                    CategoryCandidateOption(
+                        code=code,
+                        label=CATEGORY_NAMES[code],
+                        source="classifier_multiple",
+                        selectable=True,
+                        readiness_eligible=True,
+                    )
+                    for code in category_resolution.candidates
+                ],
+                category_procurement_type=selected_type,
+                category_subject_fingerprint=(
+                    category_resolution.subject_fingerprint
+                ),
+                category_decomposition_fingerprint=decomposition_fingerprint,
+                decomposition_fingerprint=decomposition_fingerprint,
+                category_step_id=f"category-deterministic:{key}",
+            )
+            category_response = _format_category_candidates(
+                category_resolution.candidates
+            )
+        elif (
+            category_resolution is not None
+            and category_resolution.decision == "deterministic_exact"
+            and active is not None
+            and not active.dialog_state.intake_conversation.is_empty
+        ):
+            intake_conversation = IntakeConversationState()
+        elif (
+            category_resolution is not None
+            and category_resolution.decision == "unresolved"
+        ):
+            intake_conversation = IntakeConversationState()
+            category_response = _format_category_candidates(())
+        if category_resolution is None and "category_code" in update.values:
             if (
                 active is not None
                 and not active.dialog_state.intake_conversation.is_empty
             ):
                 intake_conversation = IntakeConversationState()
-        elif question is not None and question.field_code == "category_code":
+        elif (
+            category_resolution is None
+            and question is not None
+            and question.field_code == "category_code"
+        ):
             intake_conversation = self._category_state(
                 active,
                 category_candidates,
             )
-        elif update.values.get("procurement_type") in {"goods", "service"}:
+        elif (
+            category_resolution is None
+            and update.values.get("procurement_type") in {"goods", "service"}
+        ):
             selected_type = update.values["procurement_type"]
             source = " ".join(
                 value
@@ -629,7 +781,8 @@ class TelegramIntakeAdapter:
             else:
                 intake_conversation = IntakeConversationState()
         elif (
-            active is not None
+            category_resolution is None
+            and active is not None
             and active.intake_result.draft.category_code is None
             and active.dialog_state.intake_conversation.is_empty
         ):
@@ -678,7 +831,9 @@ class TelegramIntakeAdapter:
                     self._category_candidates(refreshed),
                 )
             return TelegramIntakeOutcome(text_result, key, update)
-        response = format_intake_result(result, self._category_candidates(result))
+        response = category_response or format_intake_result(
+            result, self._category_candidates(result)
+        )
         self._awaiting_new_request_description.discard(user_id)
         if update.values.get("budget_status") == "unknown":
             response = "Хорошо, отмечу, что бюджет нужно уточнить.\n\n" + response
@@ -1309,16 +1464,32 @@ class TelegramIntakeAdapter:
         )
         stored = active.dialog_state.intake_conversation.category_candidates
         if stored:
-            state_type = (
-                active.dialog_state.intake_conversation.category_procurement_type
-            )
+            conversation = active.dialog_state.intake_conversation
+            state_type = conversation.category_procurement_type
             if state_type is not None and procurement_type != state_type:
+                return ()
+            if (
+                conversation.category_decomposition_fingerprint is not None
+                and conversation.decomposition_fingerprint is not None
+                and conversation.category_decomposition_fingerprint
+                != conversation.decomposition_fingerprint
+            ):
+                return ()
+            expected_fingerprint = conversation.category_subject_fingerprint
+            if (
+                expected_fingerprint is not None
+                and procurement_type is not None
+                and expected_fingerprint
+                != category_subject_fingerprint(
+                    procurement_type.value,
+                    active.intake_result.draft.item_name or "",
+                )
+            ):
                 return ()
             return tuple(
                 option.code
                 for option in stored
                 if option.selectable
-                and option.readiness_eligible
                 and (expected_prefix is None or option.code.startswith(expected_prefix))
             )
         question = active.intake_result.next_question
@@ -1330,6 +1501,113 @@ class TelegramIntakeAdapter:
         if classification.candidates:
             return classification.candidates[:4]
         return self._derived_category_candidates(active, latest_text)
+
+    def _resolve_category_for_update(
+        self,
+        update: IntakeFieldUpdate,
+        active: PersistentIntakeStepResult | None,
+        source_text: str,
+        *,
+        should_resolve: bool,
+    ) -> CategoryResolution | None:
+        if not should_resolve or self._category_resolver is None:
+            return None
+        procurement_type = update.values.get("procurement_type")
+        if procurement_type not in {"goods", "service"} and active is not None:
+            current_type = active.intake_result.draft.procurement_type
+            procurement_type = current_type.value if current_type is not None else None
+        item_name = update.values.get("item_name")
+        if not isinstance(item_name, str) and active is not None:
+            item_name = active.intake_result.draft.item_name
+        if procurement_type not in {"goods", "service"} or not isinstance(
+            item_name, str
+        ):
+            return None
+        return self._category_resolver.resolve(
+            procurement_type,
+            item_name,
+            source_text,
+        )
+
+    def _handle_llm_category_confirmation(
+        self,
+        user: ResolvedTelegramUser,
+        active: PersistentIntakeStepResult | None,
+        key: str,
+        message_id: int,
+        text: str,
+    ) -> TelegramIntakeOutcome | None:
+        if active is None:
+            return None
+        state = active.dialog_state.intake_conversation
+        options = [
+            option
+            for option in state.category_candidates
+            if option.source == "llm_exact" and option.selectable
+        ]
+        normalized = " ".join(text.casefold().replace("ё", "е").split())
+        if len(options) != 1 or normalized not in {"да", "подтвердить", "верно"}:
+            if len(options) == 1 and normalized in {
+                "выбрать другую",
+                "другая",
+                "нет",
+            }:
+                result = self._orchestrator.process_structured_step(
+                    user.user_id,
+                    IntakeFieldUpdate(),
+                    request_id=active.request_id,
+                    incoming_message=self._envelope(
+                        message_id, "telegram_category_reject"
+                    ),
+                    idempotency_key=key,
+                    intake_conversation=IntakeConversationState(),
+                )
+                outcome = TelegramIntakeOutcome(
+                    "Уточните назначение или опишите предмет закупки подробнее.",
+                    key,
+                    IntakeFieldUpdate(),
+                    result,
+                    reason_code="category_candidates_missing",
+                )
+                self._remember_message_outcome(key, outcome)
+                return outcome
+            return None
+        option = options[0]
+        draft = active.intake_result.draft
+        assert draft.procurement_type is not None
+        fingerprint = category_subject_fingerprint(
+            draft.procurement_type.value,
+            draft.item_name or "",
+        )
+        update = IntakeFieldUpdate(
+            values={"category_code": option.code},
+            source=UpdateSource.USER,
+            evidence_by_field={
+                "category_code": (
+                    f"category_support=llm_confirmed:{fingerprint}:{option.code}"
+                )
+            },
+            answered_field_code="category_code",
+        )
+        result = self._orchestrator.process_structured_step(
+            user.user_id,
+            update,
+            request_id=active.request_id,
+            incoming_message=self._envelope(
+                message_id, "telegram_category_confirmed"
+            ),
+            idempotency_key=key,
+            intake_conversation=IntakeConversationState(),
+        )
+        outcome = TelegramIntakeOutcome(
+            format_intake_result(result, self._category_candidates(result)),
+            key,
+            update,
+            result,
+            card_actions(result),
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
 
     def _start_multi_category_split(
         self,
@@ -1855,6 +2133,7 @@ class TelegramIntakeAdapter:
             category_decomposition_fingerprint=(
                 previous.decomposition_fingerprint
             ),
+            decomposition_fingerprint=previous.decomposition_fingerprint,
             category_question_fingerprint=fingerprint,
             category_clarification_repeats=(
                 previous.category_clarification_repeats if repeats is None else repeats
@@ -1886,6 +2165,8 @@ class TelegramIntakeAdapter:
         ):
             return True
         if question is None:
+            return False
+        if question.field_code == "category_code":
             return False
         if question.question_type == "free_text":
             return True
@@ -1954,6 +2235,16 @@ def _format_category_candidates(candidates: tuple[str, ...]) -> str:
         f"{clarification}Подходящие категории:\n{options}"
         "\n\nНапишите номер или название категории."
     )
+
+
+def _format_llm_category_resolution(resolution: CategoryResolution) -> str:
+    if resolution.decision == "llm_exact":
+        code = resolution.candidates[0]
+        return (
+            f"Похоже, подходит категория «{CATEGORY_NAMES[code]} ({code})». "
+            "Подтвердить категорию?\n\n• Да\n• Выбрать другую"
+        )
+    return _format_category_candidates(resolution.candidates)
 
 
 def _selected_item(

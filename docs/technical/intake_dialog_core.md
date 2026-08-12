@@ -171,3 +171,28 @@ Persistence orchestration, request lifecycle и Telegram adapter реализо�
 отдельными слоями: ядро само не регистрирует заявку, не присваивает номер и не
 формирует Telegram markup. Production E2E и генерация RAG-ответов остаются вне
 этого backend milestone.
+
+## Closed-taxonomy category resolution
+
+Категория определяется каскадом: deterministic exact → persisted deterministic
+candidates → LLM-assisted closed taxonomy → controlled unresolved. Источник
+taxonomy — `CATEGORY_NAMES` и `CATEGORY_DESCRIPTIONS`, версия
+`intake-categories-v2`; prompt не содержит независимо поддерживаемой копии кодов.
+Версия `v2` разводит ремонт/монтаж/техническое обслуживание S01 и не являющиеся
+ими специализированные метрологические, поверочные, калибровочные,
+испытательные и экспертные услуги S15.
+
+Проверка category evidence допускает только безопасные изменения русских
+окончаний внутри непрерывной предметной фразы. Совпадение по одному служебному
+или общему слову не подтверждает evidence.
+
+Provenance различает `classifier_exact`, `classifier_multiple`, `derived`,
+`llm_exact`, `llm_candidates`, `llm_confirmed`, `persisted_strong` и legacy
+`generic_fallback`. Только deterministic support или подтверждённый пользователем
+LLM candidate участвует в readiness. Для `llm_confirmed` validator проверяет код,
+тип и fingerprint актуального предмета. Поэтому stale confirmation не переживает
+изменение `item_name`/`procurement_type`, а lifecycle confirm не доверяет одному
+существованию G/S-кода.
+
+Metadata хранится в существующих JSON-проекциях draft и
+`dialog_states.state_data`; новая SQL migration не требуется.
