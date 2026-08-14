@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -7,6 +8,7 @@ import pytest
 from app.rag.embeddings import FakeEmbeddingProvider
 from app.rag.exceptions import EmbeddingError, IndexingError
 from app.rag.indexing_service import KnowledgeIndexingService
+from app.rag.models import EmbeddingItem
 from app.rag.repository import (
     InMemoryKnowledgeRepository,
     SupabaseKnowledgeRepository,
@@ -20,6 +22,89 @@ class FailingEmbeddingProvider:
 
     def embed_query(self, text: str) -> list[float]:
         raise EmbeddingError("Synthetic embedding failure")
+
+
+class _ChunkTableOperation:
+    def __init__(self, table, operation: str, payload=None, on_conflict=None):
+        self._table = table
+        self._operation = operation
+        self._payload = payload
+        self._on_conflict = on_conflict
+        self._ids: set[str] | None = None
+
+    def in_(self, column: str, values: list[str]):
+        assert column == "id"
+        self._ids = {str(value) for value in values}
+        return self
+
+    def execute(self):
+        if self._operation == "select":
+            rows = self._table.rows
+            if self._ids is not None:
+                rows = [row for row in rows if str(row["id"]) in self._ids]
+            return SimpleNamespace(data=[dict(row) for row in rows])
+        for incoming in self._payload:
+            row = dict(incoming)
+            if self._on_conflict == "id":
+                match = next(
+                    (item for item in self._table.rows if item["id"] == row["id"]),
+                    None,
+                )
+            else:
+                match = next(
+                    (
+                        item
+                        for item in self._table.rows
+                        if item["document_id"] == row["document_id"]
+                        and item["chunk_index"] == row["chunk_index"]
+                    ),
+                    None,
+                )
+            for item in self._table.rows:
+                if item is match:
+                    continue
+                if item["id"] == row["id"]:
+                    raise ValueError("23505 knowledge_chunks_pkey")
+                if (
+                    item["document_id"] == row["document_id"]
+                    and item["chunk_index"] == row["chunk_index"]
+                ):
+                    raise ValueError("23505 knowledge_chunks_document_index_key")
+            if match is None:
+                self._table.rows.append(row)
+            else:
+                match.update(row)
+        return SimpleNamespace(data=[])
+
+
+class _ChunkTable:
+    def __init__(self, rows: list[dict]):
+        self.rows = [dict(row) for row in rows]
+
+    def select(self, _columns: str):
+        return _ChunkTableOperation(self, "select")
+
+    def upsert(self, payload, *, on_conflict: str, default_to_null: bool):
+        del default_to_null
+        return _ChunkTableOperation(self, "upsert", payload, on_conflict)
+
+
+class _ChunkClient:
+    def __init__(self, rows: list[dict]):
+        self.chunk_table = _ChunkTable(rows)
+
+    def table(self, name: str):
+        assert name == "knowledge_chunks"
+        return self.chunk_table
+
+
+def _stored_row(chunk, *, embedding: list[float] | None = None) -> dict:
+    row = chunk.model_dump(mode="json")
+    row["id"] = row.pop("chunk_id")
+    row["embedding"] = embedding
+    row["embedding_model"] = "fake-v1" if embedding else None
+    row["embedded_at"] = "2026-08-01T00:00:00+00:00" if embedding else None
+    return row
 
 
 def make_service(
@@ -186,6 +271,105 @@ def test_supabase_chunk_upsert_targets_logical_unique_constraint() -> None:
     assert payload[0]["embedding"] is None
     assert payload[0]["embedding_model"] is None
     assert payload[0]["embedded_at"] is None
+
+
+def test_supabase_upsert_parks_stale_row_that_occupies_current_uuid() -> None:
+    first = make_chunk("Первый фрагмент", chunk_index=0)
+    shifted = make_chunk(
+        "Второй фрагмент",
+        chunk_index=1,
+        fixed_id=first.chunk_id,
+    )
+    stale = make_chunk(
+        "Второй фрагмент",
+        chunk_index=0,
+        fixed_id=first.chunk_id,
+    )
+    client = _ChunkClient([_stored_row(stale, embedding=[0.5, 0.5])])
+    repository = SupabaseKnowledgeRepository(client)
+
+    repository.upsert_chunks([shifted])
+
+    assert len(client.chunk_table.rows) == 1
+    row = client.chunk_table.rows[0]
+    assert row["id"] == shifted.chunk_id
+    assert (row["document_id"], row["chunk_index"]) == (
+        shifted.document_id,
+        1,
+    )
+    assert row["embedding"] == [0.5, 0.5]
+
+
+def test_supabase_upsert_recovers_shifted_chunks_after_partial_run() -> None:
+    inserted = make_chunk("Новый фрагмент", chunk_index=0)
+    first = make_chunk("Первый фрагмент", chunk_index=1)
+    second = make_chunk("Второй фрагмент", chunk_index=2)
+    stale_first = first.model_copy(update={"chunk_index": 0})
+    stale_second = second.model_copy(update={"chunk_index": 1})
+    client = _ChunkClient(
+        [
+            _stored_row(stale_first, embedding=[0.2, 0.2]),
+            _stored_row(stale_second, embedding=[0.3, 0.3]),
+        ]
+    )
+    repository = SupabaseKnowledgeRepository(client)
+
+    repository.upsert_chunks([inserted, first, second])
+    repository.upsert_chunks([inserted, first, second])
+
+    rows = sorted(client.chunk_table.rows, key=lambda item: item["chunk_index"])
+    assert [(row["id"], row["chunk_index"]) for row in rows] == [
+        (inserted.chunk_id, 0),
+        (first.chunk_id, 1),
+        (second.chunk_id, 2),
+    ]
+    assert [row["embedding"] for row in rows] == [
+        None,
+        [0.2, 0.2],
+        [0.3, 0.3],
+    ]
+
+
+def test_supabase_repairs_118_expected_from_117_shifted_rows() -> None:
+    expected = [
+        make_chunk(f"Фрагмент {index}", chunk_index=index)
+        for index in range(118)
+    ]
+    insertion_index = 6
+    actual = [
+        chunk.model_copy(
+            update={
+                "chunk_index": (
+                    chunk.chunk_index
+                    if chunk.chunk_index < insertion_index
+                    else chunk.chunk_index - 1
+                )
+            }
+        )
+        for chunk in expected
+        if chunk.chunk_index != insertion_index
+    ]
+    client = _ChunkClient(
+        [_stored_row(chunk, embedding=[0.4, 0.6]) for chunk in actual]
+    )
+    repository = SupabaseKnowledgeRepository(client)
+
+    repository.upsert_chunks(expected)
+
+    missing = expected[insertion_index]
+    assert len(client.chunk_table.rows) == 118
+    assert sum(row["embedding"] is not None for row in client.chunk_table.rows) == 117
+    repository.update_chunk_embeddings(
+        [
+            EmbeddingItem(
+                chunk_id=UUID(str(missing.chunk_id)),
+                embedding=[0.7, 0.3],
+                embedding_model="fake-v1",
+            )
+        ]
+    )
+    assert len(client.chunk_table.rows) == 118
+    assert all(row["embedding"] is not None for row in client.chunk_table.rows)
 
 
 def test_embedding_model_change_requires_reembedding(tmp_path: Path) -> None:

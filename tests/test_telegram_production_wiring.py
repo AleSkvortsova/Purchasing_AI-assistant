@@ -764,7 +764,11 @@ def test_full_location_and_one_response_per_message_in_production_wiring(
     )
 
 
-def test_budgeted_service_requirements_use_production_wiring(monkeypatch) -> None:
+def test_budgeted_service_requirements_use_production_wiring(
+    monkeypatch,
+    freeze_intake_today,
+) -> None:
+    freeze_intake_today(REFERENCE_DATE)
     text = (
         "Нужно заказать сервисное обслуживание на три принтера в офисе "
         "на Невском, забюджетировано, 10 тыс. р., до 12 августа"

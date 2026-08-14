@@ -438,6 +438,9 @@ class SupabaseKnowledgeRepository:
         "section_path,heading,content,content_sha256,chunk_index,priority,"
         "version,effective_date,token_count_estimate,char_count,metadata"
     )
+    _CHUNK_STATE_COLUMNS = (
+        f"{_CHUNK_COLUMNS},embedding,embedding_model,embedded_at"
+    )
 
     def __init__(self, client: Client, *, batch_size: int = 100) -> None:
         self._client = client
@@ -482,10 +485,12 @@ class SupabaseKnowledgeRepository:
         )
 
     def upsert_chunks(self, chunks: list[KnowledgeChunk]) -> None:
+        if not chunks:
+            return
         try:
             response = (
                 self._client.table("knowledge_chunks")
-                .select("id,document_id,chunk_index,content_sha256")
+                .select(self._CHUNK_STATE_COLUMNS)
                 .execute()
             )
             current_by_id = {
@@ -501,14 +506,61 @@ class SupabaseKnowledgeRepository:
                 "Failed to inspect existing knowledge chunks"
             ) from exc
 
+        expected_by_position = {
+            (chunk.document_id, chunk.chunk_index): chunk for chunk in chunks
+        }
+        occupied_positions = set(current_by_position) | set(expected_by_position)
+        next_temporary_index: dict[str, int] = {}
+        parking: list[dict[str, Any]] = []
+        for row in response.data:
+            position = (row["document_id"], row["chunk_index"])
+            expected = expected_by_position.get(position)
+            if expected is not None and UUID(str(expected.chunk_id)) == UUID(
+                str(row["id"])
+            ):
+                continue
+            document_id = row["document_id"]
+            candidate = next_temporary_index.get(
+                document_id,
+                max(
+                    (
+                        index
+                        for current_document, index in occupied_positions
+                        if current_document == document_id
+                    ),
+                    default=-1,
+                )
+                + 1,
+            )
+            while (document_id, candidate) in occupied_positions:
+                candidate += 1
+            occupied_positions.add((document_id, candidate))
+            next_temporary_index[document_id] = candidate + 1
+            parked = dict(row)
+            parked["chunk_index"] = candidate
+            parking.append(parked)
+
+        # Rows that block a current natural-key position are first parked at
+        # unused positions. This is non-destructive and makes retries safe when
+        # content-based UUIDs move after a chunk insertion or removal.
+        self._upsert_batches(
+            "knowledge_chunks",
+            parking,
+            on_conflict="id",
+            operation="park displaced knowledge chunks",
+        )
+
         unchanged: list[dict[str, Any]] = []
         reset: list[dict[str, Any]] = []
+        relocate_by_id: list[dict[str, Any]] = []
         for chunk in chunks:
             chunk_id = UUID(str(chunk.chunk_id))
             payload = _chunk_payload(chunk)
-            current = current_by_position.get(
+            current_at_position = current_by_position.get(
                 (chunk.document_id, chunk.chunk_index)
-            ) or current_by_id.get(chunk_id)
+            )
+            current_by_chunk_id = current_by_id.get(chunk_id)
+            current = current_at_position or current_by_chunk_id
             identity_changed = (
                 current is not None
                 and UUID(str(current["id"])) != chunk_id
@@ -517,7 +569,24 @@ class SupabaseKnowledgeRepository:
                 current is not None
                 and current["content_sha256"] != chunk.content_sha256
             )
-            if identity_changed or content_changed:
+            if current_by_chunk_id is not None and (
+                current_by_chunk_id["document_id"] != chunk.document_id
+                or current_by_chunk_id["chunk_index"] != chunk.chunk_index
+            ):
+                if current_by_chunk_id["content_sha256"] == chunk.content_sha256:
+                    payload.update(
+                        embedding=current_by_chunk_id.get("embedding"),
+                        embedding_model=current_by_chunk_id.get("embedding_model"),
+                        embedded_at=current_by_chunk_id.get("embedded_at"),
+                    )
+                else:
+                    payload.update(
+                        embedding=None,
+                        embedding_model=None,
+                        embedded_at=None,
+                    )
+                relocate_by_id.append(payload)
+            elif identity_changed or content_changed:
                 payload.update(
                     embedding=None,
                     embedding_model=None,
@@ -526,6 +595,12 @@ class SupabaseKnowledgeRepository:
                 reset.append(payload)
             else:
                 unchanged.append(payload)
+        self._upsert_batches(
+            "knowledge_chunks",
+            relocate_by_id,
+            on_conflict="id",
+            operation="relocate knowledge chunks",
+        )
         for payloads in (unchanged, reset):
             self._upsert_batches(
                 "knowledge_chunks",
