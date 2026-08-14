@@ -499,6 +499,55 @@ def category_subject_fingerprint(procurement_type: str, item_name: str) -> str:
     ).hexdigest()[:16]
 
 
+def category_draft_context_fingerprint(draft: RequestDraftData) -> str | None:
+    context = build_category_resolution_context(
+        draft,
+        IntakeFieldUpdate(),
+        "",
+        include_current_text=False,
+    )
+    return context.fingerprint if context is not None else None
+
+
+def category_confirmation_evidence(
+    procurement_type: str,
+    item_name: str,
+    category_code: str,
+    context_fingerprint: str | None,
+) -> str:
+    subject_fingerprint = category_subject_fingerprint(procurement_type, item_name)
+    semantic_fingerprint = context_fingerprint or subject_fingerprint
+    return (
+        "category_support=llm_confirmed:"
+        f"{subject_fingerprint}:{semantic_fingerprint}:{category_code}"
+    )
+
+
+def valid_category_confirmation_evidence(
+    draft: RequestDraftData,
+    evidence: str,
+) -> bool:
+    support = evidence.removeprefix("category_support=")
+    parts = support.split(":")
+    if draft.procurement_type is None or draft.category_code is None:
+        return False
+    expected_subject = category_subject_fingerprint(
+        draft.procurement_type.value,
+        draft.item_name or "",
+    )
+    if len(parts) == 3 and parts[0] == "llm_confirmed":
+        # Compatibility with confirmations persisted before semantic fingerprints.
+        return parts[1] == expected_subject and parts[2] == draft.category_code
+    if len(parts) != 4 or parts[0] != "llm_confirmed":
+        return False
+    expected_context = category_draft_context_fingerprint(draft)
+    return (
+        parts[1] == expected_subject
+        and parts[2] == expected_context
+        and parts[3] == draft.category_code
+    )
+
+
 def category_classification_strict_json_schema() -> dict:
     return to_strict_json_schema(CategoryClassificationPayload)
 

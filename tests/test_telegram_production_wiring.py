@@ -9,7 +9,8 @@ from app.bot.category_resolution import (
     CategoryClassificationPayload,
     CategoryClassificationRequest,
     FakeCategoryClassificationProvider,
-    category_subject_fingerprint,
+    category_confirmation_evidence,
+    category_draft_context_fingerprint,
 )
 from app.bot.dialog_modes import InMemoryDialogModeRepository
 from app.bot.formatters import format_request_card
@@ -224,14 +225,56 @@ def test_unknown_category_uses_shared_production_wiring_and_confirmation(
     asyncio.run(handle_text_message(confirmed_message, dependencies))
     confirmed = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
     assert confirmed.intake_result.draft.category_code == "G02"
-    expected_fingerprint = category_subject_fingerprint(
-        "goods", confirmed.intake_result.draft.item_name or ""
-    )
     assert confirmed.intake_result.draft.field_states[
         "category_code"
     ].evidence == (
-        f"category_support=llm_confirmed:{expected_fingerprint}:G02"
+        category_confirmation_evidence(
+            "goods",
+            confirmed.intake_result.draft.item_name or "",
+            "G02",
+            category_draft_context_fingerprint(confirmed.intake_result.draft),
+        )
     )
+    assert category_provider.calls == 1
+
+
+def test_dock_station_confirmation_survives_production_wiring(monkeypatch) -> None:
+    raw = _raw(
+        procurement_type_raw="goods",
+        item_name_raw="док-станция для ноутбука",
+        evidence_by_field={
+            "procurement_type": "нужна док-станция",
+            "item_name": "док-станция для ноутбука",
+        },
+    )
+    category_provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code="G04",
+            alternatives=[],
+            confidence="high",
+            evidence="док-станция",
+            rationale_code="taxonomy_match",
+        )
+    )
+    dependencies, _ = _build(
+        monkeypatch,
+        SequenceProvider([raw]),
+        category_provider,
+    )
+
+    initial = FakeMessage("нужна док-станция для ноутбука", 905)
+    asyncio.run(handle_text_message(initial, dependencies))
+    assert "IT-периферия (G04)" in initial.answers[0]
+
+    confirmation = FakeMessage("да", 906)
+    asyncio.run(handle_text_message(confirmation, dependencies))
+    confirmed = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert confirmed.intake_result.draft.category_code == "G04"
+    assert confirmed.intake_result.draft.field_states["category_code"].confirmed
+    assert confirmed.intake_result.next_question is not None
+    assert confirmed.intake_result.next_question.field_code != "category_code"
     assert category_provider.calls == 1
 
 

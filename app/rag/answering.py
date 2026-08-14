@@ -1444,6 +1444,7 @@ def _claim_answers_intent(claim: str, plan: RegulationQueryPlan) -> bool:
         "category_fields": (
             r"категор|обязательн|поле|требован|интеграц|результат|приемк|указать"
         ),
+        "category_classification": r"категор|классифик|\b[gs]\d{2}\b",
         "budget_policy": r"бюджет|внебюджет|финанс|согласован|подать|заявк",
         "brand_policy": r"бренд|эквивалент|референс|обоснов",
         "channel": r"устн|официальн|регистрац|ассистент|заявк",

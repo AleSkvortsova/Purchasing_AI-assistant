@@ -188,13 +188,12 @@ def _intents(
     )
     asks_fields = _asks_for_fields(value) or asks_submission
     asks_category = bool(re.search(r"\bкатегор\w*|к\s+какой\s+категор", value))
-    if category_hint is not None and (
-        asks_category
-        or (
-            asks_fields
-            and not asks_submission
-            and category_hint in {"S03", "S05"}
-        )
+    if asks_category and _procurement_domain_signal(value):
+        intents.append("category_classification")
+    elif category_hint is not None and (
+        asks_fields
+        and not asks_submission
+        and category_hint in {"S03", "S05"}
     ):
         intents.append("category_classification")
     if asks_fields:

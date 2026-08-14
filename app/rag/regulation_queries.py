@@ -19,6 +19,7 @@ RegulationQueryIntent = Literal[
     "transport_fields",
     "mixed_categories",
     "status",
+    "category_classification",
     "category_fields",
     "budget_policy",
     "brand_policy",
@@ -260,8 +261,12 @@ def _detect_intents(
                 understanding.normalized_question,
             ):
                 mapped.append("mixed_categories")
-            else:
+            elif not _asks_taxonomy_classification(
+                understanding.normalized_question
+            ):
                 mapped.append("category_fields")
+            else:
+                mapped.append("category_classification")
         elif intent == "brand_equivalent_policy":
             mapped.append("brand_policy")
         elif intent == "responsibility_policy":
@@ -290,6 +295,7 @@ def _map_intent(
         "request_cancellation": "request_cancellation",
         "brand_equivalent_policy": "brand_policy",
         "responsibility_policy": "responsibility",
+        "category_classification": "category_classification",
         "draft_and_history": "draft_history",
         "supplier_recommendation": "outside_kb",
         "general_help": "general_help",
@@ -314,7 +320,11 @@ def _map_intent(
                 r"вместе|одн\w*\s+заяв|\d+\s+заяв|объедин",
                 understanding.normalized_question,
             )
-        ) else "category_fields"
+        ) else (
+            "category_classification"
+            if _asks_taxonomy_classification(understanding.normalized_question)
+            else "category_fields"
+        )
     return mapping.get(intent, "generic")
 
 
@@ -397,6 +407,10 @@ def _intent_queries(
                 "категория инициатор подразделение бюджет дата",
             )
         return ("категориальные обязательные поля заявки",)
+    if intent == "category_classification":
+        return (
+            "классификатор категорий закупок предмет назначение код категории",
+        )
     if intent == "budget_policy":
         status = detect_budget_status(normalized)
         prefix = "внебюджетная" if status == "unbudgeted" else "бюджетная"
@@ -463,6 +477,13 @@ def _expansion_terms(intent: RegulationQueryIntent) -> list[str]:
             "обязательные",
             "поля",
             "требования",
+        ],
+        "category_classification": [
+            "классификатор",
+            "категория",
+            "код",
+            "предмет",
+            "назначение",
         ],
         "budget_policy": ["бюджет", "внебюджетная", "заявка", "согласование"],
         "brand_policy": ["бренд", "эквивалент", "обоснование", "референс"],
@@ -549,6 +570,10 @@ def _supports_intent(chunk: SearchResult, intent: RegulationQueryIntent) -> bool
                 value,
             )
         )
+    if intent == "category_classification":
+        return chunk.document_type == "classifier" and bool(
+            re.search(r"классифик|категор|\b[gs]\d{2}\b", value)
+        )
     if intent == "budget_policy":
         return chunk.document_type in {"faq", "regulation", "approval_rules"} and bool(
             re.search(r"бюджет|внебюджет|финанс|согласован", value)
@@ -566,6 +591,10 @@ def _supports_intent(chunk: SearchResult, intent: RegulationQueryIntent) -> bool
     if intent == "outside_domain":
         return False
     return chunk.document_type not in _EXAMPLE_TYPES
+
+
+def _asks_taxonomy_classification(value: str) -> bool:
+    return bool(re.search(r"\bкатегор\w*|к\s+какой\s+категор", value))
 
 
 def _asks_for_category_fields(value: str) -> bool:
@@ -691,6 +720,7 @@ def _intent_match_priority(
         "mixed_categories": r"разн.*категор|отдельн.*заяв",
         "status": _status_phrase(plan.normalized_query) or r"статус",
         "category_fields": r"s05|it-разработ|категориальн.*пол",
+        "category_classification": r"классифик|категор|\b[gs]\d{2}\b",
         "budget_policy": r"внебюджет|бюджет",
         "brand_policy": r"бренд|эквивалент",
         "urgency": r"сроч|p2|нормативн",

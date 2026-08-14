@@ -162,6 +162,17 @@ URGENCY_P2 = _result(
     "P2 — высокий",
     "P2 применяется при сроке меньше нормативного или риске срыва мероприятия.",
 )
+CLASSIFIER = _result(
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "kb-004",
+    "classifier",
+    "Классификатор категорий закупок",
+    "Правила классификации",
+    "G03 — сетевое и инфраструктурное IT-оборудование. "
+    "G04 — IT-периферия: мониторы и аксессуары рабочего места. "
+    "G15 — самостоятельное инженерное и промышленное оборудование, "
+    "включая промышленное вентиляционное оборудование.",
+)
 
 
 def _payload(answer: str, claims: list[tuple[str, list[HybridRetrievalResult]]]):
@@ -177,6 +188,46 @@ def _payload(answer: str, claims: list[tuple[str, list[HybridRetrievalResult]]])
         insufficient_context=False,
         source_conflict=False,
     )
+
+
+@pytest.mark.parametrize(
+    ("question", "answer", "expected_code"),
+    [
+        (
+            "К какой категории относится сетевое оборудование?",
+            "Сетевое оборудование относится к категории G03.",
+            "G03",
+        ),
+        (
+            "К какой категории относится самостоятельное инженерное оборудование?",
+            "Самостоятельное инженерное оборудование относится к категории G15.",
+            "G15",
+        ),
+        (
+            "К какой категории относятся мониторы?",
+            "Мониторы относятся к категории G04.",
+            "G04",
+        ),
+        (
+            "К какой категории относится промышленный вентилятор?",
+            "Промышленный вентилятор относится к категории G15.",
+            "G15",
+        ),
+    ],
+)
+def test_taxonomy_questions_are_answered_from_classifier(
+    question: str,
+    answer: str,
+    expected_code: str,
+) -> None:
+    result = RegulationQuestionAnsweringService(
+        StaticRetrieval([CLASSIFIER]),
+        FakeGroundedAnswerProvider(_payload(answer, [(answer, [CLASSIFIER])])),
+    ).answer(question)
+
+    assert result.status == "answered"
+    assert expected_code in result.answer
+    assert [source.document_id for source in result.sources] == ["kb-004"]
 
 
 def test_budgeted_180000_route_and_deadline_are_answered() -> None:

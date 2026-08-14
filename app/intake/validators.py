@@ -134,13 +134,24 @@ class IntakeFieldValidator:
                     draft,
                     category_state,
                 )
-                incompatible = (
-                    classification.kind == "exact"
-                    and classification.category_code != draft.category_code
-                    and not accepted_alternative
-                ) or (
-                    bool(classification.candidates)
-                    and draft.category_code not in classification.candidates
+                confirmed_llm_support = bool(
+                    persisted_support
+                    and category_state is not None
+                    and isinstance(category_state.evidence, str)
+                    and category_state.evidence.startswith(
+                        "category_support=llm_confirmed:"
+                    )
+                )
+                incompatible = not confirmed_llm_support and (
+                    (
+                        classification.kind == "exact"
+                        and classification.category_code != draft.category_code
+                        and not accepted_alternative
+                    )
+                    or (
+                        bool(classification.candidates)
+                        and draft.category_code not in classification.candidates
+                    )
                 )
                 unsupported = classification.kind == "none" and not persisted_support
                 if incompatible or unsupported:
@@ -166,15 +177,6 @@ def _has_valid_category_support(draft, category_state) -> bool:
         "persisted_strong",
     }:
         return True
-    parts = support.split(":")
-    if len(parts) != 3 or parts[0] != "llm_confirmed":
-        return False
-    if draft.procurement_type is None or draft.category_code is None:
-        return False
-    from app.bot.category_resolution import category_subject_fingerprint
+    from app.bot.category_resolution import valid_category_confirmation_evidence
 
-    expected = category_subject_fingerprint(
-        draft.procurement_type.value,
-        draft.item_name or "",
-    )
-    return parts[1] == expected and parts[2] == draft.category_code
+    return valid_category_confirmation_evidence(draft, category_state.evidence)

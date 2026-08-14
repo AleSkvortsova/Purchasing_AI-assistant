@@ -15,6 +15,8 @@ from app.bot.category_resolution import (
     CategoryResolution,
     CategoryResolutionService,
     build_category_resolution_context,
+    category_confirmation_evidence,
+    category_draft_context_fingerprint,
     category_subject_fingerprint,
 )
 from app.bot.decomposition import decompose_procurement_needs
@@ -449,12 +451,15 @@ class TelegramIntakeAdapter:
                 )
                 if support == "llm_confirmed":
                     draft = active.intake_result.draft
-                    fingerprint = category_subject_fingerprint(
+                    support = category_confirmation_evidence(
                         draft.procurement_type.value,
                         draft.item_name or "",
+                        proposed_category,
+                        category_draft_context_fingerprint(draft),
                     )
-                    support = f"{support}:{fingerprint}:{proposed_category}"
-                category_evidence["category_code"] = f"category_support={support}"
+                else:
+                    support = f"category_support={support}"
+                category_evidence["category_code"] = support
                 update = update.model_copy(
                     update={"evidence_by_field": category_evidence}
                 )
@@ -1656,16 +1661,15 @@ class TelegramIntakeAdapter:
         option = options[0]
         draft = active.intake_result.draft
         assert draft.procurement_type is not None
-        fingerprint = category_subject_fingerprint(
-            draft.procurement_type.value,
-            draft.item_name or "",
-        )
         update = IntakeFieldUpdate(
             values={"category_code": option.code},
             source=UpdateSource.USER,
             evidence_by_field={
-                "category_code": (
-                    f"category_support=llm_confirmed:{fingerprint}:{option.code}"
+                "category_code": category_confirmation_evidence(
+                    draft.procurement_type.value,
+                    draft.item_name or "",
+                    option.code,
+                    category_draft_context_fingerprint(draft),
                 )
             },
             answered_field_code="category_code",

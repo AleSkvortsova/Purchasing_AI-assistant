@@ -104,6 +104,36 @@ def test_it_connection_wording_targets_category_fields() -> None:
     assert any("S05" in query for query in plan.variants)
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "К какой категории относится сетевое оборудование?",
+        "К какой категории относится самостоятельное инженерное оборудование?",
+        "К какой категории относятся мониторы?",
+        "К какой категории относится промышленный вентилятор?",
+    ],
+)
+def test_taxonomy_question_targets_normative_classifier(question: str) -> None:
+    plan = build_regulation_query_plan(question)
+    classifier = _chunk(
+        "33333333-3333-4333-8333-333333333333",
+        "kb-004",
+        document_type="classifier",
+        content=(
+            "G03 — сетевое и инфраструктурное IT-оборудование. "
+            "G04 — IT-периферия. G15 — самостоятельное инженерное и "
+            "промышленное оборудование."
+        ),
+    )
+
+    assert plan.understanding.primary_intent == "category_classification"
+    assert plan.intent == "category_classification"
+    assert plan.understanding.domain_decision == "known_domain_intent"
+    assert select_relevant_regulation_chunks(plan, [classifier], limit=5) == [
+        classifier
+    ]
+
+
 def test_multi_query_fusion_is_position_based() -> None:
     first = _chunk("11111111-1111-4111-8111-111111111111", "kb-009")
     second = _chunk("22222222-2222-4222-8222-222222222222", "kb-001")

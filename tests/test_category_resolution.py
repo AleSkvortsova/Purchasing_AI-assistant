@@ -14,7 +14,8 @@ from app.bot.category_resolution import (
     FakeCategoryClassificationProvider,
     build_category_resolution_context,
     category_classification_strict_json_schema,
-    category_subject_fingerprint,
+    category_confirmation_evidence,
+    category_draft_context_fingerprint,
     validate_category_classification_schema,
 )
 from app.intake.field_registry import (
@@ -22,7 +23,13 @@ from app.intake.field_registry import (
     CATEGORY_NAMES,
     CATEGORY_TAXONOMY_VERSION,
 )
-from app.intake.models import IntakeFieldUpdate, RequestDraftData
+from app.intake.models import (
+    FieldValueState,
+    IntakeFieldUpdate,
+    RequestDraftData,
+    UpdateSource,
+)
+from app.intake.validators import IntakeFieldValidator
 from app.intake_persistence.repositories import (
     InMemoryIntakePersistenceRepository,
     InMemoryIntakeStorage,
@@ -482,6 +489,43 @@ def test_related_object_does_not_create_deterministic_category_shortcut() -> Non
     assert result.candidates == ("G04",)
 
 
+@pytest.mark.parametrize(
+    ("item_name", "source_text", "provider_code", "expected_decision"),
+    [
+        ("док-станция", "док-станция для ноутбука", "G04", "llm_exact"),
+        ("подставка", "подставка под монитор", "G04", "llm_exact"),
+        ("чехол", "чехол для ноутбука", None, "unresolved"),
+        ("кабель", "кабель для монитора", None, "unresolved"),
+    ],
+)
+def test_related_object_is_not_used_as_subject_category_evidence(
+    item_name: str,
+    source_text: str,
+    provider_code: str | None,
+    expected_decision: str,
+) -> None:
+    provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact" if provider_code else "unresolved",
+            primary_category_code=provider_code,
+            alternatives=[],
+            confidence="high" if provider_code else "low",
+            evidence=item_name if provider_code else None,
+            rationale_code=(
+                "taxonomy_match" if provider_code else "insufficient_context"
+            ),
+        )
+    )
+
+    result = CategoryResolutionService(provider=provider).resolve(
+        "goods", item_name, source_text
+    )
+
+    assert result.decision == expected_decision
+    assert result.category_code not in {"G03", "G04"}
+    assert result.candidates == ((provider_code,) if provider_code else ())
+
+
 def test_category_schema_is_strict_and_closed() -> None:
     schema = category_classification_strict_json_schema()
 
@@ -565,13 +609,85 @@ def test_llm_exact_requires_confirmation_and_survives_reload() -> None:
     draft = confirmed.result.intake_result.draft
     assert draft.category_code == "G02"
     assert draft.field_states["category_code"].confirmed is True
-    expected_fingerprint = category_subject_fingerprint(
-        "goods", draft.item_name or ""
-    )
     assert draft.field_states["category_code"].evidence == (
-        f"category_support=llm_confirmed:{expected_fingerprint}:G02"
+        category_confirmation_evidence(
+            "goods",
+            draft.item_name or "",
+            "G02",
+            category_draft_context_fingerprint(draft),
+        )
     )
     assert provider.calls == 1
+
+
+def test_confirmed_dock_station_category_is_not_reclassified_from_related_laptop(
+) -> None:
+    provider = FakeCategoryClassificationProvider(
+        CategoryClassificationPayload(
+            decision="exact",
+            primary_category_code="G04",
+            alternatives=[],
+            confidence="high",
+            evidence="док-станция",
+            rationale_code="taxonomy_match",
+        )
+    )
+    adapter, storage = _adapter(provider)
+
+    proposed = adapter.handle_text(
+        USER_ID,
+        1002,
+        1,
+        "нужна док-станция для ноутбука",
+    )
+
+    assert proposed.result is not None
+    assert proposed.result.intake_result.draft.category_code is None
+    assert "IT-периферия (G04)" in proposed.text
+    assert provider.calls == 1
+
+    reloaded, _ = _adapter(provider, storage)
+    confirmed = reloaded.handle_text(USER_ID, 1002, 2, "да")
+
+    assert confirmed.result is not None
+    draft = confirmed.result.intake_result.draft
+    assert draft.category_code == "G04"
+    assert draft.field_states["category_code"].confirmed is True
+    assert confirmed.result.intake_result.next_question is not None
+    assert confirmed.result.intake_result.next_question.field_code != "category_code"
+    assert reloaded._category_candidates(confirmed.result) == ()
+    assert provider.calls == 1
+
+
+def test_confirmed_category_is_invalidated_by_changed_semantic_context() -> None:
+    draft = RequestDraftData(
+        procurement_type="goods",
+        item_name="док-станция для ноутбука",
+        category_code="G04",
+    )
+    context_fingerprint = category_draft_context_fingerprint(draft)
+    evidence = category_confirmation_evidence(
+        "goods",
+        draft.item_name,
+        "G04",
+        context_fingerprint,
+    )
+    draft.field_states["category_code"] = FieldValueState(
+        field_code="category_code",
+        value="G04",
+        source=UpdateSource.USER,
+        evidence=evidence,
+        confirmed=True,
+    )
+
+    assert "category_code" not in IntakeFieldValidator().validate_draft(draft)
+
+    changed = draft.model_copy(
+        deep=True,
+        update={"specifications": "серверное инфраструктурное оборудование"},
+    )
+
+    assert "category_code" in IntakeFieldValidator().validate_draft(changed)
 
 
 def test_llm_candidates_show_only_validated_options_and_confirm_selection() -> None:
@@ -599,11 +715,13 @@ def test_llm_candidates_show_only_validated_options_and_confirm_selection() -> N
     assert selected.result is not None
     assert selected.result.intake_result.draft.category_code == "G02"
     selected_draft = selected.result.intake_result.draft
-    expected_fingerprint = category_subject_fingerprint(
-        "goods", selected_draft.item_name or ""
-    )
     assert selected_draft.field_states["category_code"].evidence == (
-        f"category_support=llm_confirmed:{expected_fingerprint}:G02"
+        category_confirmation_evidence(
+            "goods",
+            selected_draft.item_name or "",
+            "G02",
+            category_draft_context_fingerprint(selected_draft),
+        )
     )
     assert provider.calls == 1
 
