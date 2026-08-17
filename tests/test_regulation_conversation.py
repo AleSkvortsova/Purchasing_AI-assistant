@@ -10,7 +10,7 @@ from app.bot.dialog_modes import (
     InMemoryDialogModeStorage,
     SupabaseDialogModeRepository,
 )
-from app.bot.keyboards import MENU_INSTRUCTION, MENU_REGULATIONS
+from app.bot.keyboards import MENU_INSTRUCTION, MENU_NEW, MENU_REGULATIONS
 from app.intake_persistence.exceptions import ActiveDraftNotFoundError
 from app.rag.answering import (
     FakeGroundedAnswerProvider,
@@ -585,7 +585,7 @@ def test_household_question_after_completed_context_does_not_inherit_intent(
     assert USER_ID not in storage.pending_regulation
 
 
-def test_recipe_with_product_list_gets_scope_refusal_and_leaves_regulation_mode(
+def test_recipe_with_product_list_gets_scope_refusal_and_preserves_regulation_mode(
     qa_service: RegulationQuestionAnsweringService,
 ) -> None:
     storage = InMemoryDialogModeStorage()
@@ -609,6 +609,179 @@ def test_recipe_with_product_list_gets_scope_refusal_and_leaves_regulation_mode(
     assert result.refusal_reason == "outside_domain"
     assert result.sources == []
     assert result.diagnostics["retrieval_status"] == "not_called"
+    assert storage.modes[USER_ID] == "regulation_qa"
+    assert outcome.reply_markup is not None
+    assert USER_ID not in storage.pending_regulation
+
+
+def test_regulation_mode_survives_outside_domain_supplier_and_approval_turns(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    recipe = adapter.handle_text(
+        USER_ID,
+        1001,
+        760,
+        "Подскажи рецепт борща и составь список продуктов на четыре порции.",
+    )
+    supplier = adapter.handle_text(
+        USER_ID,
+        1001,
+        761,
+        "Какого поставщика офисной мебели выбрать в Санкт-Петербурге и у кого "
+        "сейчас самые низкие цены?",
+    )
+    approval = adapter.handle_text(
+        USER_ID,
+        1001,
+        762,
+        "Кто согласует закупку на 210 000 рублей?",
+    )
+
+    assert _result(storage, 760).refusal_reason == "outside_domain"
+    assert "внутренними закупками" in recipe.text
+    assert _result(storage, 761).refusal_reason == "outside_kb"
+    assert "не могу рекомендовать" in supplier.text
+    assert _result(storage, 762).status == "clarification_required"
+    assert "предусмотрена ли закупка бюджетом" in approval.text.casefold()
+    assert storage.modes[USER_ID] == "regulation_qa"
+
+
+def test_consecutive_outside_domain_turns_stay_in_regulation_mode(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    questions = (
+        "посоветуй новый захватывающий детективный сериал",
+        "а рецепт вкусных щей можешь дать?",
+        "какая сегодня погода?",
+    )
+    for message_id, question in enumerate(questions, start=770):
+        outcome = adapter.handle_text(USER_ID, 1001, message_id, question)
+
+        assert _result(storage, message_id).refusal_reason == "outside_domain"
+        assert "внутренними закупками" in outcome.text
+        assert outcome.reply_markup is not None
+        assert storage.modes[USER_ID] == "regulation_qa"
+
+
+def test_outside_domain_replaces_pending_but_does_not_exit_regulation_mode(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        780,
+        "Кто согласует закупку на 210 000 рублей?",
+    )
+    assert USER_ID in storage.pending_regulation
+
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        781,
+        "Подскажи рецепт яблочного пирога на четыре порции?",
+    )
+
+    assert _result(storage, 781).refusal_reason == "outside_domain"
+    assert USER_ID not in storage.pending_regulation
+    assert storage.modes[USER_ID] == "regulation_qa"
+
+
+def test_regulation_turn_log_records_mode_before_and_after(
+    qa_service: RegulationQuestionAnsweringService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    with caplog.at_level("INFO"):
+        adapter.handle_text(
+            USER_ID,
+            1001,
+            785,
+            "Подскажи рецепт борща и составь список продуктов на четыре порции.",
+        )
+
+    assert "message_ref=" in caplog.text
+    assert "mode_before=regulation_qa" in caplog.text
+    assert "mode_after=regulation_qa" in caplog.text
+    assert "reason_code=outside_domain" in caplog.text
+    assert "Подскажи рецепт" not in caplog.text
+
+
+def test_explicit_new_request_is_required_to_leave_regulation_mode(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        790,
+        "посоветуй новый захватывающий детективный сериал",
+    )
+
+    outcome = adapter.handle_menu(USER_ID, MENU_NEW)
+
+    assert storage.modes[USER_ID] == "intake"
+    assert "Опишите новую потребность" in outcome.text
+
+
+def test_controlled_refusal_then_regular_answer_preserves_regulation_mode(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    refused = adapter.handle_text(
+        USER_ID,
+        1001,
+        795,
+        "Какого поставщика офисной мебели выбрать в Санкт-Петербурге и у кого "
+        "сейчас самые низкие цены?",
+    )
+    answered = adapter.handle_text(
+        USER_ID,
+        1001,
+        796,
+        "Можно ли сохранить заявку как черновик и закончить позднее?",
+    )
+
+    assert _result(storage, 795).refusal_reason == "outside_kb"
+    assert "не могу рекомендовать" in refused.text
+    assert _result(storage, 796).status == "answered"
+    assert "чернов" in answered.text.casefold()
+    assert storage.modes[USER_ID] == "regulation_qa"
+
+
+def test_start_explicitly_exits_regulation_after_outside_domain(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+    adapter.handle_text(
+        USER_ID,
+        1001,
+        797,
+        "посоветуй новый захватывающий детективный сериал",
+    )
+
+    adapter.start_message(USER_ID)
+
     assert storage.modes[USER_ID] == "idle"
     assert USER_ID not in storage.pending_regulation
 

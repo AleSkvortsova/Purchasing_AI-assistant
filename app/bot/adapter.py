@@ -21,6 +21,7 @@ from app.bot.category_resolution import (
 )
 from app.bot.decomposition import decompose_procurement_needs
 from app.bot.dialog_modes import (
+    DialogMode,
     DialogModePersistenceError,
     DialogModeRepository,
     DialogReplayConflictError,
@@ -84,8 +85,9 @@ from app.intake_persistence.models import (
     PersistentIntakeStepResult,
     ProcurementItemCandidate,
 )
-from app.rag.answering import RegulationQuestionAnsweringService
+from app.rag.answering import RegulationAnswer, RegulationQuestionAnsweringService
 from app.rag.conversation import answer_regulation_turn
+from app.rag.question_understanding import understand_regulation_question
 from app.request_lifecycle.exceptions import (
     LifecycleConcurrentUpdateError,
     LifecycleOwnershipError,
@@ -100,6 +102,12 @@ from app.request_lifecycle.models import LifecycleCommandResult
 from app.schemas.common import RequestStatus
 
 logger = logging.getLogger(__name__)
+
+_OUTSIDE_DOMAIN_REFUSAL = (
+    "С этим запросом я не помогу — я отвечаю только на вопросы, связанные "
+    "с внутренними закупками. Могу помочь оформить заявку на товар или услугу "
+    "либо подсказать правила оформления и согласования закупки."
+)
 
 _DEBUG_SCALAR_FIELDS = {
     "quantity",
@@ -297,9 +305,42 @@ class TelegramIntakeAdapter:
                 outgoing_response_count=0,
             )
             return replace(replayed, replayed=True)
-        if self._dialog_modes.get_mode(user_id) == "regulation_qa":
-            return self._handle_regulation_question(user_id, key, text)
+        current_mode = self._dialog_modes.get_mode(user_id)
+        if current_mode == "regulation_qa":
+            return self._handle_regulation_question(
+                user_id,
+                key,
+                text,
+                mode_before=current_mode,
+            )
         active = self._active_or_none(user_id)
+        idle_initial_update: IntakeFieldUpdate | None = None
+        if current_mode == "idle" and active is None:
+            try:
+                idle_initial_update = self._parser.parse(text)
+            except TelegramParseError:
+                pass
+            understanding = understand_regulation_question(text)
+            if (
+                understanding.domain_decision == "outside_domain"
+                and not _has_confident_idle_intake_signal(
+                    text,
+                    idle_initial_update,
+                )
+            ):
+                logger.info(
+                    "Telegram idle routing message_ref=%s mode_before=idle "
+                    "domain_decision=outside_domain route=scope_refusal "
+                    "mode_after=idle",
+                    sha256(key.encode("utf-8")).hexdigest()[:12],
+                )
+                outcome = TelegramIntakeOutcome(
+                    _OUTSIDE_DOMAIN_REFUSAL,
+                    key,
+                    IntakeFieldUpdate(),
+                )
+                self._remember_message_outcome(key, outcome)
+                return outcome
         if (
             active is not None
             and active.intake_result.status == IntakeStatus.READY_FOR_CONFIRMATION
@@ -406,7 +447,7 @@ class TelegramIntakeAdapter:
             and active.dialog_state.intake_status == IntakeStatus.EDITING
         )
         try:
-            update = self._parser.parse(
+            update = idle_initial_update or self._parser.parse(
                 text,
                 None if editing else question,
                 None if editing else awaiting_field_code,
@@ -912,6 +953,8 @@ class TelegramIntakeAdapter:
         response = category_response or format_intake_result(
             result, self._category_candidates(result)
         )
+        if current_mode == "idle" and original_missing:
+            self._dialog_modes.set_mode(user_id, "intake")
         self._awaiting_new_request_description.discard(user_id)
         if update.values.get("budget_status") == "unknown":
             response = "Хорошо, отмечу, что бюджет нужно уточнить.\n\n" + response
@@ -1229,6 +1272,8 @@ class TelegramIntakeAdapter:
         user_id: UUID,
         key: str,
         text: str,
+        *,
+        mode_before: DialogMode,
     ) -> TelegramIntakeOutcome:
         if self._regulation_qa is None:
             return TelegramIntakeOutcome(
@@ -1245,6 +1290,7 @@ class TelegramIntakeAdapter:
                 key,
                 fingerprint,
             )
+            mode_after = self._dialog_modes.get_mode(user_id)
         except DialogReplayConflictError:
             return TelegramIntakeOutcome(
                 "Это сообщение уже было обработано. Отправьте вопрос ещё раз.",
@@ -1253,6 +1299,13 @@ class TelegramIntakeAdapter:
                 reply_markup=regulation_actions(),
             )
         if replay is not None:
+            self._log_regulation_turn(
+                key,
+                replay,
+                mode_before=mode_before,
+                mode_after=mode_after,
+                replayed=True,
+            )
             outcome = TelegramIntakeOutcome(
                 format_regulation_answer(replay),
                 key,
@@ -1276,16 +1329,45 @@ class TelegramIntakeAdapter:
                 fingerprint,
                 result,
             )
-            if result.refusal_reason == "outside_domain":
-                self._dialog_modes.set_mode(user_id, "idle")
+            mode_after = self._dialog_modes.get_mode(user_id)
         except DialogModePersistenceError:
             return self._technical_error(key)
+        self._log_regulation_turn(
+            key,
+            result,
+            mode_before=mode_before,
+            mode_after=mode_after,
+        )
+        outcome = TelegramIntakeOutcome(
+            format_regulation_answer(result),
+            key,
+            IntakeFieldUpdate(),
+            reply_markup=regulation_actions(),
+        )
+        self._remember_message_outcome(key, outcome)
+        return outcome
+
+    @staticmethod
+    def _log_regulation_turn(
+        key: str,
+        result: RegulationAnswer,
+        *,
+        mode_before: DialogMode,
+        mode_after: DialogMode,
+        replayed: bool = False,
+    ) -> None:
         diagnostics = result.diagnostics
         logger.info(
-            "Telegram regulation answer message_ref=%s mode=regulation_qa "
+            "Telegram regulation answer message_ref=%s mode_before=%s "
+            "status=%s refusal_reason=%s mode_after=%s replayed=%s "
             "retrieval_status=%s chunks=%s sources=%s duration_ms=%s "
             "reason_code=%s error_code=%s",
             sha256(key.encode("utf-8")).hexdigest()[:12],
+            mode_before,
+            result.status,
+            result.refusal_reason,
+            mode_after,
+            replayed,
             diagnostics.get("retrieval_status"),
             diagnostics.get("chunk_count", 0),
             diagnostics.get("source_count", 0),
@@ -1293,18 +1375,6 @@ class TelegramIntakeAdapter:
             result.refusal_reason,
             diagnostics.get("error_code"),
         )
-        outcome = TelegramIntakeOutcome(
-            format_regulation_answer(result),
-            key,
-            IntakeFieldUpdate(),
-            reply_markup=(
-                None
-                if result.refusal_reason == "outside_domain"
-                else regulation_actions()
-            ),
-        )
-        self._remember_message_outcome(key, outcome)
-        return outcome
 
     def _history_outcome(self, user_id: UUID, key: str) -> TelegramIntakeOutcome:
         if self._request_history is None:
@@ -2465,6 +2535,33 @@ def _mixed_need_split_response(
         )
     )
     return "\n".join(lines)
+
+
+def _has_confident_idle_intake_signal(
+    text: str,
+    update: IntakeFieldUpdate | None,
+) -> bool:
+    if update is not None and (
+        {
+            "procurement_type",
+            "category_code",
+            "quantity",
+            "unit",
+            "amount",
+            "budget_status",
+            "delivery_location",
+        }
+        & set(update.values)
+    ):
+        return True
+    normalized = " ".join(text.casefold().replace("ё", "е").split())
+    return bool(
+        re.match(
+            r"^(?:(?:мне|нам)\s+)?(?:куп\w*|закуп\w*|приобрет\w*|закаж\w*)\b",
+            normalized,
+        )
+        or re.match(r"^[а-я-]+(?:ть|ти|чь)\s+\S+", normalized)
+    )
 
 
 def _user_context(user: ResolvedTelegramUser | UUID) -> ResolvedTelegramUser:

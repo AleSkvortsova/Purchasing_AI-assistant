@@ -16,8 +16,8 @@ from app.bot.category_resolution import (
 )
 from app.bot.dialog_modes import InMemoryDialogModeRepository
 from app.bot.formatters import format_request_card
-from app.bot.handlers import handle_text_message
-from app.bot.keyboards import MENU_REGULATIONS
+from app.bot.handlers import handle_start, handle_text_message
+from app.bot.keyboards import MENU_NEW, MENU_REGULATIONS
 from app.bot.normalization import NaturalDateParser
 from app.bot.parser import DeterministicIntakeParser
 from app.core.config import Settings
@@ -183,7 +183,7 @@ def _build(
     return dependencies, repository
 
 
-def test_outside_domain_refusal_then_short_intake_uses_production_wiring(
+def test_regulation_mode_requires_explicit_new_request_before_short_intake(
     monkeypatch,
 ) -> None:
     provider = SequenceProvider(
@@ -220,8 +220,37 @@ def test_outside_domain_refusal_then_short_intake_uses_production_wiring(
     ]
     assert provider.calls == 0
     assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == (
+        "regulation_qa"
+    )
 
-    purchase = FakeMessage("Нужно купить 10 пачек бумаги А4", 102)
+    supplier = FakeMessage(
+        "Какого поставщика офисной мебели выбрать в Санкт-Петербурге и у кого "
+        "сейчас самые низкие цены?",
+        102,
+    )
+    asyncio.run(handle_text_message(supplier, dependencies))
+
+    assert provider.calls == 0
+    assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+    assert "не могу рекомендовать" in supplier.answers[0]
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == (
+        "regulation_qa"
+    )
+
+    approval = FakeMessage("Кто согласует закупку на 210 000 рублей?", 103)
+    asyncio.run(handle_text_message(approval, dependencies))
+
+    assert provider.calls == 0
+    assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+    assert "предусмотрена ли закупка бюджетом" in approval.answers[0].casefold()
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == (
+        "regulation_qa"
+    )
+
+    asyncio.run(handle_text_message(FakeMessage(MENU_NEW, 104), dependencies))
+
+    purchase = FakeMessage("Нужно купить 10 пачек бумаги А4", 105)
     asyncio.run(handle_text_message(purchase, dependencies))
     persisted = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
 
@@ -231,6 +260,65 @@ def test_outside_domain_refusal_then_short_intake_uses_production_wiring(
     assert persisted.intake_result.draft.quantity == Decimal("10")
     assert persisted.intake_result.draft.unit == "пач."
     assert "С этим запросом я не помогу" not in purchase.answers[0]
+
+
+def test_fresh_idle_rejects_outside_domain_before_starting_intake(
+    monkeypatch,
+) -> None:
+    provider = SequenceProvider(
+        [
+            _raw(
+                procurement_type_raw="goods",
+                item_name_raw="бумага А4",
+                quantity_raw="10",
+                unit_raw="пач.",
+                category_raw="G01",
+                evidence_by_field={
+                    "procurement_type": "купить",
+                    "item_name": "бумаги А4",
+                    "quantity": "10 пачек",
+                    "unit": "10 пачек",
+                    "category": "бумаги А4",
+                },
+            )
+        ]
+    )
+    dependencies, _ = _build(monkeypatch, provider)
+
+    asyncio.run(handle_start(FakeMessage("/start", 110), dependencies))
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == "idle"
+    assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+
+    outside_questions = (
+        "порекомендуй сериал на вечер",
+        "Подскажи рецепт борща и составь список продуктов на четыре порции",
+        "какая сегодня погода?",
+    )
+    for message_id, question in enumerate(outside_questions, start=111):
+        message = FakeMessage(question, message_id)
+        asyncio.run(handle_text_message(message, dependencies))
+
+        assert message.answers == [
+            "С этим запросом я не помогу — я отвечаю только на вопросы, "
+            "связанные с внутренними закупками. Могу помочь оформить заявку "
+            "на товар или услугу либо подсказать правила оформления и "
+            "согласования закупки."
+        ]
+        assert "Это товар или услуга?" not in message.answers[0]
+        assert provider.calls == 0
+        assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+        assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == "idle"
+
+    purchase = FakeMessage("Нужно купить 10 пачек бумаги А4", 114)
+    asyncio.run(handle_text_message(purchase, dependencies))
+    persisted = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert provider.calls == 1
+    assert persisted.intake_result.draft.procurement_type == "goods"
+    assert persisted.intake_result.draft.item_name == "бумага А4"
+    assert persisted.intake_result.draft.quantity == Decimal("10")
+    assert persisted.intake_result.draft.unit == "пач."
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == "intake"
 
 
 @pytest.mark.parametrize(
@@ -251,15 +339,47 @@ def test_outside_domain_refusal_then_short_intake_uses_production_wiring(
             "goods",
         ),
         (
-            "Нужно заказать обслуживание.",
+            "Нужно заказать обслуживание оборудования.",
             {
                 "procurement_type_raw": "service",
-                "item_name_raw": "обслуживание",
+                "item_name_raw": "обслуживание оборудования",
                 "category_raw": "S01",
                 "evidence_by_field": {
                     "procurement_type": "заказать обслуживание",
-                    "item_name": "обслуживание",
-                    "category": "обслуживание",
+                    "item_name": "обслуживание оборудования",
+                    "category": "обслуживание оборудования",
+                },
+            },
+            "service",
+        ),
+        (
+            "Нужны 2 роутера для склада",
+            {
+                "procurement_type_raw": "goods",
+                "item_name_raw": "роутеры",
+                "quantity_raw": "2",
+                "unit_raw": "шт.",
+                "category_raw": "G03",
+                "evidence_by_field": {
+                    "procurement_type": "роутера",
+                    "item_name": "роутера",
+                    "quantity": "2 роутера",
+                    "unit": "2 роутера",
+                    "category": "роутера",
+                },
+            },
+            "goods",
+        ),
+        (
+            "Нужно заказать генеральную уборку цеха",
+            {
+                "procurement_type_raw": "service",
+                "item_name_raw": "генеральная уборка цеха",
+                "category_raw": "S02",
+                "evidence_by_field": {
+                    "procurement_type": "уборку",
+                    "item_name": "генеральную уборку цеха",
+                    "category": "уборку",
                 },
             },
             "service",
@@ -280,6 +400,23 @@ def test_short_legitimate_intake_is_not_treated_as_outside_domain(
 
     assert persisted.intake_result.draft.procurement_type == expected_type
     assert "С этим запросом я не помогу" not in message.answers[0]
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == "intake"
+
+
+def test_explicit_intake_does_not_apply_idle_outside_domain_gate(
+    monkeypatch,
+) -> None:
+    provider = SequenceProvider([_raw()])
+    dependencies, _ = _build(monkeypatch, provider)
+    asyncio.run(handle_text_message(FakeMessage(MENU_NEW, 119), dependencies))
+
+    message = FakeMessage("порекомендуй сериал на вечер", 120)
+    asyncio.run(handle_text_message(message, dependencies))
+
+    assert provider.calls == 1
+    assert dependencies.intake_adapter._active_or_none(USER_ID) is not None
+    assert dependencies.intake_adapter._dialog_modes.get_mode(USER_ID) == "intake"
+    assert "Это товар или услуга?" in message.answers[0]
 
 
 def test_unknown_category_uses_shared_production_wiring_and_confirmation(
