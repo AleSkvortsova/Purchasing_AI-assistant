@@ -585,6 +585,34 @@ def test_household_question_after_completed_context_does_not_inherit_intent(
     assert USER_ID not in storage.pending_regulation
 
 
+def test_recipe_with_product_list_gets_scope_refusal_and_leaves_regulation_mode(
+    qa_service: RegulationQuestionAnsweringService,
+) -> None:
+    storage = InMemoryDialogModeStorage()
+    adapter = _adapter(storage, qa_service)
+    adapter.handle_menu(USER_ID, MENU_REGULATIONS)
+
+    outcome = adapter.handle_text(
+        USER_ID,
+        1001,
+        75,
+        "Подскажи рецепт борща и составь список продуктов на четыре порции.",
+    )
+    result = _result(storage, 75)
+
+    assert outcome.text == (
+        "С этим запросом я не помогу — я отвечаю только на вопросы, связанные "
+        "с внутренними закупками. Могу помочь оформить заявку на товар или "
+        "услугу либо подсказать правила оформления и согласования закупки."
+    )
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "outside_domain"
+    assert result.sources == []
+    assert result.diagnostics["retrieval_status"] == "not_called"
+    assert storage.modes[USER_ID] == "idle"
+    assert USER_ID not in storage.pending_regulation
+
+
 def test_plan_phrase_is_answered_without_unnecessary_clarification(
     qa_service: RegulationQuestionAnsweringService,
 ) -> None:

@@ -569,6 +569,7 @@ def test_explicit_draft_status_questions_remain_status_questions(question: str) 
     "question",
     [
         "Подскажи рецепт борща на четыре порции.",
+        "Подскажи рецепт борща и составь список продуктов на четыре порции.",
         "Какая погода завтра в Москве?",
         "Кто сыграл главную роль в фильме «Ирония судьбы»?",
         "Напиши функцию на Python для сортировки списка.",
@@ -581,6 +582,26 @@ def test_out_of_domain_questions_are_not_guessed_as_procurement(question: str) -
 
     assert result.primary_intent == "outside_domain"
     assert result.domain_decision == "outside_domain"
+
+
+def test_current_price_supplier_question_remains_outside_kb() -> None:
+    result = understand_regulation_question(
+        "Какого поставщика офисной мебели выбрать в Санкт-Петербурге "
+        "и у кого сейчас самые низкие цены?"
+    )
+
+    assert result.primary_intent == "supplier_recommendation"
+    assert result.outside_kb_intent is True
+    assert result.domain_decision == "known_domain_intent"
+
+
+def test_approval_question_remains_in_regulation_domain() -> None:
+    result = understand_regulation_question(
+        "Кто согласует закупку на 210 000 рублей?"
+    )
+
+    assert result.primary_intent == "approval_route"
+    assert result.domain_decision == "known_domain_intent"
 
 
 @pytest.mark.parametrize(

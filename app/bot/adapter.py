@@ -1276,6 +1276,8 @@ class TelegramIntakeAdapter:
                 fingerprint,
                 result,
             )
+            if result.refusal_reason == "outside_domain":
+                self._dialog_modes.set_mode(user_id, "idle")
         except DialogModePersistenceError:
             return self._technical_error(key)
         diagnostics = result.diagnostics
@@ -1295,7 +1297,11 @@ class TelegramIntakeAdapter:
             format_regulation_answer(result),
             key,
             IntakeFieldUpdate(),
-            reply_markup=regulation_actions(),
+            reply_markup=(
+                None
+                if result.refusal_reason == "outside_domain"
+                else regulation_actions()
+            ),
         )
         self._remember_message_outcome(key, outcome)
         return outcome

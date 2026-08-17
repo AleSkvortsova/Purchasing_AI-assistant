@@ -4,6 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
 import app.bot.__main__ as bot_main
 from app.bot.category_resolution import (
     CategoryClassificationPayload,
@@ -179,6 +181,105 @@ def _build(
         date_parser=NaturalDateParser(today_provider=lambda: REFERENCE_DATE),
     )
     return dependencies, repository
+
+
+def test_outside_domain_refusal_then_short_intake_uses_production_wiring(
+    monkeypatch,
+) -> None:
+    provider = SequenceProvider(
+        [
+            _raw(
+                procurement_type_raw="goods",
+                item_name_raw="бумага А4",
+                quantity_raw="10",
+                unit_raw="пач.",
+                category_raw="G01",
+                evidence_by_field={
+                    "procurement_type": "купить",
+                    "item_name": "бумаги А4",
+                    "quantity": "10 пачек",
+                    "unit": "10 пачек",
+                    "category": "бумаги А4",
+                },
+            )
+        ]
+    )
+    dependencies, _ = _build(monkeypatch, provider)
+
+    asyncio.run(handle_text_message(FakeMessage(MENU_REGULATIONS, 100), dependencies))
+    recipe = FakeMessage(
+        "Подскажи рецепт борща и составь список продуктов на четыре порции.",
+        101,
+    )
+    asyncio.run(handle_text_message(recipe, dependencies))
+
+    assert recipe.answers == [
+        "С этим запросом я не помогу — я отвечаю только на вопросы, связанные "
+        "с внутренними закупками. Могу помочь оформить заявку на товар или "
+        "услугу либо подсказать правила оформления и согласования закупки."
+    ]
+    assert provider.calls == 0
+    assert dependencies.intake_adapter._active_or_none(USER_ID) is None
+
+    purchase = FakeMessage("Нужно купить 10 пачек бумаги А4", 102)
+    asyncio.run(handle_text_message(purchase, dependencies))
+    persisted = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert provider.calls == 1
+    assert persisted.intake_result.draft.procurement_type == "goods"
+    assert persisted.intake_result.draft.item_name == "бумага А4"
+    assert persisted.intake_result.draft.quantity == Decimal("10")
+    assert persisted.intake_result.draft.unit == "пач."
+    assert "С этим запросом я не помогу" not in purchase.answers[0]
+
+
+@pytest.mark.parametrize(
+    ("text", "raw_values", "expected_type"),
+    [
+        (
+            "Нужны мониторы.",
+            {
+                "procurement_type_raw": "goods",
+                "item_name_raw": "мониторы",
+                "category_raw": "G04",
+                "evidence_by_field": {
+                    "procurement_type": "мониторы",
+                    "item_name": "мониторы",
+                    "category": "мониторы",
+                },
+            },
+            "goods",
+        ),
+        (
+            "Нужно заказать обслуживание.",
+            {
+                "procurement_type_raw": "service",
+                "item_name_raw": "обслуживание",
+                "category_raw": "S01",
+                "evidence_by_field": {
+                    "procurement_type": "заказать обслуживание",
+                    "item_name": "обслуживание",
+                    "category": "обслуживание",
+                },
+            },
+            "service",
+        ),
+    ],
+)
+def test_short_legitimate_intake_is_not_treated_as_outside_domain(
+    monkeypatch,
+    text: str,
+    raw_values: dict,
+    expected_type: str,
+) -> None:
+    dependencies, _ = _build(monkeypatch, SequenceProvider([_raw(**raw_values)]))
+    message = FakeMessage(text, 103)
+
+    asyncio.run(handle_text_message(message, dependencies))
+    persisted = dependencies.intake_adapter._orchestrator.get_active_session(USER_ID)
+
+    assert persisted.intake_result.draft.procurement_type == expected_type
+    assert "С этим запросом я не помогу" not in message.answers[0]
 
 
 def test_unknown_category_uses_shared_production_wiring_and_confirmation(

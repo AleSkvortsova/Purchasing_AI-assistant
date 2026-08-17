@@ -324,6 +324,22 @@ def test_explicit_personal_purchase_is_rejected_before_retrieval() -> None:
     assert provider.calls == []
 
 
+def test_current_price_supplier_question_keeps_controlled_outside_kb_refusal() -> None:
+    retrieval = FakeRetrieval([CHUNK_A])
+    provider = FakeGroundedAnswerProvider()
+
+    result = RegulationQuestionAnsweringService(retrieval, provider).answer(
+        "Какого поставщика офисной мебели выбрать в Санкт-Петербурге "
+        "и у кого сейчас самые низкие цены?"
+    )
+
+    assert result.status == "insufficient_context"
+    assert result.refusal_reason == "outside_kb"
+    assert result.diagnostics["retrieval_status"] == "not_called"
+    assert retrieval.calls == []
+    assert provider.calls == []
+
+
 def test_conflicting_personal_and_internal_purpose_clarifies_before_retrieval() -> None:
     retrieval = FakeRetrieval([CHUNK_A])
     provider = FakeGroundedAnswerProvider()

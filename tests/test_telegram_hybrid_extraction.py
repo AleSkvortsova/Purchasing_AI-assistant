@@ -901,7 +901,9 @@ def test_compound_clarification_can_update_quantity_and_date_once() -> None:
     )
 
 
-def test_air_conditioner_smoke_answer_replaces_proposal_without_conflict() -> None:
+def test_air_conditioner_smoke_answer_replaces_proposal_without_conflict(
+    freeze_intake_today,
+) -> None:
     class SequenceProvider:
         def __init__(self) -> None:
             self.calls = 0
@@ -976,6 +978,7 @@ def test_air_conditioner_smoke_answer_replaces_proposal_without_conflict() -> No
             return result
 
     provider = SequenceProvider()
+    freeze_intake_today(date(2026, 7, 28))
     dates = NaturalDateParser(today_provider=lambda: date(2026, 7, 28))
     intake = PersistentIntakeOrchestrator(
         InMemoryIntakePersistenceRepository(),

@@ -592,8 +592,10 @@ def _direct_understanding_answer(
     if understanding.domain_decision == "outside_domain":
         return RegulationAnswer(
             answer=(
-                "Я могу отвечать только на вопросы об оформлении и обработке "
-                "внутренних заявок на закупку. Уточните вопрос по закупке или заявке."
+                "С этим запросом я не помогу — я отвечаю только на вопросы, "
+                "связанные с внутренними закупками. Могу помочь оформить заявку "
+                "на товар или услугу либо подсказать правила оформления и "
+                "согласования закупки."
             ),
             status="insufficient_context",
             refusal_reason="outside_domain",
